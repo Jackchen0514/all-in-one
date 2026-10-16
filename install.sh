@@ -255,10 +255,31 @@ open_port() {  # open_port PORT tcp|udp [from-ip]
   fi
 }
 
-# tcp_port_owner PORT -> name of the process listening on TCP PORT (empty if free)
-tcp_port_owner() {
+# tcp_port_user PORT -> "process pid unit" of the listener on TCP PORT (empty if free)
+tcp_port_user() {
   command -v ss >/dev/null || return 0
-  ss -Hltnp "sport = :$1" 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1
+  local line name pid unit=""
+  line="$(ss -Hltnp "sport = :$1" 2>/dev/null | head -1)"
+  [ -n "$line" ] || return 0
+  name="$(echo "$line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')"
+  pid="$(echo "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
+  [ -n "$pid" ] && unit="$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ')"
+  echo "${name:-?} ${pid:-?} ${unit:--}"
+}
+
+# check_tcp_port PORT OWN_UNIT OPTION: die unless TCP PORT is free or already held by OWN_UNIT
+# (a re-install), naming the process / systemd unit in the way.
+check_tcp_port() {
+  local port="$1" own="$2" opt="$3" name pid unit hint=""
+  read -r name pid unit <<<"$(tcp_port_user "$port")"
+  [ -z "${name:-}" ] || [ "$unit" = "$own" ] && return 0
+  if [ "$unit" = hy2mgr.service ]; then
+    hint=" This is the old hysteria-manager panel; allinone replaces it (its database is adopted on the first panel install)."
+  fi
+  local stop="kill $pid"
+  case "$unit" in *.service) stop="systemctl disable --now $unit";; esac
+  die "TCP $port is already in use by $name (pid $pid, unit $unit).$hint
+       Stop it ($stop) and re-run, or choose another port with $opt"
 }
 
 # ---- certificates (acme.sh + Cloudflare DNS-01) ----------------------------
@@ -290,7 +311,8 @@ issue_cert() {
   local fix="chown root:$CERT_GROUP $dir/*.pem && chmod 640 $dir/*.pem"
   "$ACME_HOME/acme.sh" --install-cert -d "$d" --ecc \
     --key-file "$dir/key.pem" --fullchain-file "$dir/fullchain.pem" \
-    --reloadcmd "$fix; systemctl try-restart allinone anytls-server" >/dev/null || true
+    --reloadcmd "$fix; for s in allinone anytls-server; do systemctl try-restart \$s 2>/dev/null; done; true" \
+    >/dev/null || true
   eval "$fix"
 }
 
@@ -366,6 +388,7 @@ wait_panel() {
 install_panel() {
   ask DOMAIN "Panel domain (e.g. panel.example.com)"
   valid_domain "$DOMAIN" || die "invalid domain: $DOMAIN"
+  check_tcp_port "$PANEL_PORT" allinone.service --panel-port   # before touching DNS / certificates
   ask EMAIL "ACME email"
   install_pkgs curl python3 openssl tar
   python3 -c 'import sys; sys.exit(sys.version_info < (3, 8))' || die "python >= 3.8 required"
@@ -940,10 +963,7 @@ install_anytls_node() {
     elif [ "$MODE" = all ] && [ "$PANEL_PORT" = 443 ]; then AT_PORT=8443
     else AT_PORT=443; fi
   fi
-  local owner; owner="$(tcp_port_owner "$AT_PORT")"
-  if [ -n "$owner" ] && [ "$owner" != anytls-server ]; then
-    die "TCP $AT_PORT is already used by $owner; pick another with --anytls-port"
-  fi
+  check_tcp_port "$AT_PORT" anytls-server.service --anytls-port
 
   # import users of a running standalone anytls-go before the agent takes over
   local existing=""
