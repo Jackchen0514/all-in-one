@@ -294,24 +294,36 @@ ensure_acme() {
   fi
 }
 
-# issue_cert DOMAIN -> $CERT_DIR/DOMAIN/{fullchain,key}.pem, readable by group $CERT_GROUP.
-# acme.sh keeps one install target per domain, so the panel and anytls share these files and the
-# renewal hook restarts whichever of them is running.
+acme_issue() {  # acme_issue DOMAIN ZONE_ID
+  CF_Token="$CF_TOKEN" CF_Zone_ID="$2" "$ACME_HOME/acme.sh" --issue --dns dns_cf -d "$1" \
+    --server letsencrypt --keylength ec-256
+}
+
+# issue_cert DOMAIN SERVICE -> $CERT_DIR/DOMAIN/{fullchain,key}.pem, readable by group $CERT_GROUP.
+# Every local service using DOMAIN (allinone, hysteria-server, anytls-server) shares this one
+# acme.sh certificate: a second ACME client challenging the same name minutes later can make
+# Let's Encrypt see its cached TXT value ("Incorrect TXT record"). DOMAIN/services lists the
+# units that the renewal hook restarts.
 issue_cert() {
-  local d="$1" zid rc=0 dir="$CERT_DIR/$1"
+  local d="$1" svc="$2" zid rc=0 dir="$CERT_DIR/$1"
   ensure_acme
   getent group "$CERT_GROUP" >/dev/null || groupadd --system "$CERT_GROUP"
-  zid="$(cf zone "$d")"
-  info "issuing certificate for $d (DNS-01, Let's Encrypt)"
-  CF_Token="$CF_TOKEN" CF_Zone_ID="$zid" "$ACME_HOME/acme.sh" --issue --dns dns_cf -d "$d" \
-    --server letsencrypt --keylength ec-256 || rc=$?
-  [ $rc -eq 0 ] || [ $rc -eq 2 ] || die "certificate issuance failed for $d (acme.sh exit $rc)"   # 2 = still valid
   mkdir -p "$dir"
   chown root:"$CERT_GROUP" /etc/allinone "$CERT_DIR" "$dir"; chmod 750 "$CERT_DIR" "$dir"; chmod 755 /etc/allinone
+  grep -qsx "$svc" "$dir/services" || echo "$svc" >> "$dir/services"
+  zid="$(cf zone "$d")"
+  info "issuing certificate for $d (DNS-01, Let's Encrypt)"
+  acme_issue "$d" "$zid" || rc=$?
+  if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then   # 2 = still valid, skipped
+    warn "certificate issuance for $d failed (acme.sh exit $rc); retrying in 2 minutes in case a DNS resolver still caches an old challenge record"
+    sleep 120
+    rc=0; acme_issue "$d" "$zid" || rc=$?
+  fi
+  [ $rc -eq 0 ] || [ $rc -eq 2 ] || die "certificate issuance failed for $d (acme.sh exit $rc)"
   local fix="chown root:$CERT_GROUP $dir/*.pem && chmod 640 $dir/*.pem"
   "$ACME_HOME/acme.sh" --install-cert -d "$d" --ecc \
     --key-file "$dir/key.pem" --fullchain-file "$dir/fullchain.pem" \
-    --reloadcmd "$fix; for s in allinone anytls-server; do systemctl try-restart \$s 2>/dev/null; done; true" \
+    --reloadcmd "$fix; for s in \$(cat $dir/services); do systemctl try-restart \$s 2>/dev/null; done; true" \
     >/dev/null || true
   eval "$fix"
 }
@@ -394,7 +406,7 @@ install_panel() {
   python3 -c 'import sys; sys.exit(sys.version_info < (3, 8))' || die "python >= 3.8 required"
   fetch_source
   setup_cloudflare "$DOMAIN"
-  issue_cert "$DOMAIN"
+  issue_cert "$DOMAIN" allinone
 
   id "$PANEL_USER" >/dev/null 2>&1 || useradd --system --home-dir "$PANEL_DIR" --shell /usr/sbin/nologin "$PANEL_USER"
   usermod -aG "$CERT_GROUP" "$PANEL_USER"
@@ -547,8 +559,10 @@ install_hysteria_node() {
   command -v iptables >/dev/null || install_pkgs iptables || warn "iptables not available: port hopping will not work"
   install_hysteria_bin
   id "$HY_USER" >/dev/null 2>&1 || useradd --system --home-dir "$HY_DATA_DIR" --shell /usr/sbin/nologin "$HY_USER"
-  mkdir -p "$HY_CONF_DIR" "$HY_DATA_DIR/acme"
+  mkdir -p "$HY_CONF_DIR" "$HY_DATA_DIR"
   chown -R "$HY_USER":"$HY_USER" "$HY_DATA_DIR"
+  issue_cert "$DOMAIN" hysteria-server
+  usermod -aG "$CERT_GROUP" "$HY_USER"
 
   # keep stats secret on re-install
   local conf="$HY_CONF_DIR/config.yaml" secret="" obfs_pw="" port_spec="$NODE_PORT" hop="$HOP"
@@ -591,17 +605,9 @@ print(json.dumps({"type": "hysteria2", "name": os.environ["NAME"], "address": os
   {
     echo "listen: :$listen_port"
     echo
-    echo "acme:"
-    echo "  domains:"
-    echo "    - $DOMAIN"
-    echo "  email: $EMAIL"
-    echo "  ca: letsencrypt"
-    echo "  dir: $HY_DATA_DIR/acme"
-    echo "  type: dns"
-    echo "  dns:"
-    echo "    name: cloudflare"
-    echo "    config:"
-    echo "      cloudflare_api_token: $CF_TOKEN"
+    echo "tls:   # shared acme.sh certificate, renewed by cron (restarts hysteria-server)"
+    echo "  cert: $CERT_DIR/$DOMAIN/fullchain.pem"
+    echo "  key: $CERT_DIR/$DOMAIN/key.pem"
     echo
     if [ -n "$obfs_pw" ]; then
       echo "obfs:"
@@ -652,7 +658,7 @@ EOF
     if [ -n "$panel_ip" ]; then open_port "$STATS_PORT" tcp "$panel_ip"; fi
   fi
 
-  info "[hysteria2] waiting for hysteria to obtain the certificate (DNS-01 can take ~1 min)"
+  info "[hysteria2] waiting for hysteria to start"
   if ! wait_hysteria "$started"; then
     journalctl -u hysteria-server -n 20 --no-pager || true
     die "hysteria did not start; see: journalctl -u hysteria-server -n 50"
@@ -689,6 +695,7 @@ Wants=network-online.target
 [Service]
 User=$HY_USER
 Group=$HY_USER
+SupplementaryGroups=$CERT_GROUP
 WorkingDirectory=$HY_DATA_DIR
 Environment=HYSTERIA_LOG_LEVEL=info
 ExecStart=$HY_BIN server -c $HY_CONF_DIR/config.yaml
@@ -984,7 +991,7 @@ print("导入 %d 个用户%s" % (len(r["created"]), "，跳过 %d 个: %s" % (le
     fi
   fi
 
-  issue_cert "$DOMAIN"
+  issue_cert "$DOMAIN" anytls-server
   if [ "$AT_VERSION" = latest ]; then AT_VERSION="$(latest_anytls_version)"; AT_VERSION="${AT_VERSION:-latest}"; fi
   install_anytls_bin
   id "$AT_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$AT_USER"
