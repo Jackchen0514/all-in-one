@@ -1,0 +1,13 @@
+[Unit]
+Description=allinone panel (Hysteria2 / AnyTLS / Shadowsocks)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/allinone
+ExecStart=/usr/bin/python3 -m allinone
+EnvironmentFile=/opt/allinone/.env
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

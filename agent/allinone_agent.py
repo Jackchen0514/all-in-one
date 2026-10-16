@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""allinone-agent: keeps the anytls-server / ssmanager processes on this machine in sync with the
+allinone panel. Standard library only (Python 3.8+).
+
+Every cycle, for each node listed in the config:
+  1. read the cumulative per-user byte counters from the local server and POST them to
+     <panel>/agent/<token>/report (the panel turns them into deltas, applies limits and history);
+  2. GET <panel>/agent/<token>/state and apply it:
+       anytls      -> local admin API (/api/users): create / update / delete users; inactive users
+                      are disabled with an expiry in the past so open sessions are cut too
+       shadowsocks -> local ssmanager manager protocol (UDP): add / remove one port per user
+
+Only outbound connections to the panel are needed. Config (default /etc/allinone/agent.json):
+
+  {"panel": "https://panel.example.com", "interval": 30, "nodes": [
+     {"token": "<node auth token>", "type": "anytls",
+      "api": "https://127.0.0.1:8843", "api_key": "<anytls-server -api-key>"},
+     {"token": "<node auth token>", "type": "shadowsocks", "manager": "127.0.0.1:6100"}]}
+
+Usage: allinone-agent [--config PATH] [--once]
+"""
+import argparse
+import json
+import logging
+import os
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+VERSION = "0.1.0"
+STATE_DIR = os.environ.get("AIO_AGENT_STATE_DIR", "/var/lib/allinone-agent")
+BLOCKED_UNTIL = "2000-01-01T00:00:00Z"  # anytls expiry used to block an inactive user
+log = logging.getLogger("allinone-agent")
+
+
+class AgentError(Exception):
+    pass
+
+
+def http_json(method, url, body=None, headers=None, insecure=False, timeout=15):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    ctx = None
+    if insecure and url.startswith("https:"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:200].decode(errors="replace").strip()
+        raise AgentError("HTTP %d from %s %s %s" % (e.code, method, url, detail))
+    except Exception as e:
+        raise AgentError("%s %s: %s" % (method, url, e))
+    if not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise AgentError("invalid JSON from %s" % url)
+
+
+def open_firewall(port):
+    """Best effort: allow a new shadowsocks port (TCP + UDP) in an active ufw / firewalld.
+    Cloud security groups are outside our reach."""
+    def ok(cmd):
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    try:
+        if shutil.which("ufw") and b"Status: active" in subprocess.run(["ufw", "status"], stdout=subprocess.PIPE).stdout:
+            for proto in ("tcp", "udp"):
+                ok(["ufw", "allow", "%d/%s" % (port, proto)])
+        elif shutil.which("firewall-cmd") and ok(["firewall-cmd", "--state"]):
+            for proto in ("tcp", "udp"):
+                ok(["firewall-cmd", "--permanent", "--add-port=%d/%s" % (port, proto)])
+            ok(["firewall-cmd", "--reload"])
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+class AnyTLS:
+    """Drives anytls-server through its admin API. Usernames on the server = panel usernames.
+    The panel does all accounting, so per-user quota / reset / multiplier on the server are kept
+    neutral; IP / connection limits set by hand on the server are left alone."""
+
+    NEUTRAL = {"traffic_limit_bytes": 0, "traffic_multiplier": 1.0, "traffic_reset_cycle": "none"}
+
+    def __init__(self, cfg):
+        self.api = cfg.get("api", "https://127.0.0.1:8843").rstrip("/")
+        self.key = cfg.get("api_key", "")
+
+    def _call(self, method, path, body=None):
+        # anytls reuses its public certificate for the admin API, which never matches 127.0.0.1
+        return http_json(method, self.api + path, body, {"Authorization": "Bearer " + self.key}, insecure=True)
+
+    def users(self):
+        return {u["username"]: u for u in (self._call("GET", "/api/users") or [])}
+
+    def collect(self):
+        users = self.users()
+        counters = {name: int((u.get("usage") or {}).get("traffic_used_bytes", u.get("traffic_used_bytes", 0)))
+                    for name, u in users.items()}
+        online = sum(int((u.get("usage") or {}).get("active_conns", 0)) for u in users.values())
+        return counters, online
+
+    @staticmethod
+    def _blocked(u):
+        exp = u.get("expires_at") or ""
+        return not u.get("enabled") or not (exp == "" or exp.startswith("0001-"))
+
+    def apply(self, state):
+        have = self.users()
+        want = {u["username"]: u for u in state.get("users", [])}
+        changed = 0
+        for name, w in want.items():
+            body = {"password": w["password"], "enabled": bool(w["active"]),
+                    "expires_at": "" if w["active"] else BLOCKED_UNTIL}
+            h = have.get(name)
+            if h is None:
+                body.update(self.NEUTRAL, username=name)
+                self._call("POST", "/api/users", body)
+                changed += 1
+                continue
+            neutral = all(h.get(k) == v for k, v in self.NEUTRAL.items())
+            if h.get("password") != w["password"] or self._blocked(h) == bool(w["active"]) or not neutral:
+                body.update(self.NEUTRAL)
+                self._call("PUT", "/api/users/%d" % h["id"], body)
+                changed += 1
+        for name, h in have.items():
+            if name not in want:
+                self._call("DELETE", "/api/users/%d" % h["id"])
+                changed += 1
+        return changed
+
+
+# ---------------------------------------------------------------------------
+class Shadowsocks:
+    """Drives shadowsocks-rust ssmanager through its UDP manager protocol: one port per user.
+    The ports applied (with password / method / owner) are kept in a state file, so password
+    changes are detected and counters can be attributed to users across restarts."""
+
+    def __init__(self, cfg, token):
+        host, _, port = cfg.get("manager", "127.0.0.1:6100").rpartition(":")
+        self.addr = (host.strip("[]") or "127.0.0.1", int(port))
+        self.timeout = float(cfg.get("timeout", 3))
+        self.state_file = cfg.get("state") or os.path.join(STATE_DIR, "ss-%s.json" % token[:12])
+
+    def _send(self, msg):
+        fam = socket.AF_INET6 if ":" in self.addr[0] else socket.AF_INET
+        s = socket.socket(fam, socket.SOCK_DGRAM)
+        try:
+            s.settimeout(self.timeout)
+            s.sendto(msg.encode(), self.addr)
+            data, _ = s.recvfrom(65535)
+        except socket.timeout:
+            raise AgentError("ssmanager at %s:%d did not answer %r" % (self.addr[0], self.addr[1], msg.split(":")[0]))
+        except OSError as e:
+            raise AgentError("ssmanager at %s:%d: %s" % (self.addr[0], self.addr[1], e))
+        finally:
+            s.close()
+        return data.decode("utf-8", "replace").strip()
+
+    @staticmethod
+    def _body(reply):
+        """Replies look like `stat: {...}`, `[...]` or `{"servers": [...]}`."""
+        starts = [i for i in (reply.find("{"), reply.find("[")) if i != -1]
+        if not starts:
+            return None
+        try:
+            return json.loads(reply[min(starts):])
+        except ValueError:
+            return None
+
+    def _ok(self, reply, op):
+        if not reply.lower().startswith("ok"):
+            raise AgentError("ssmanager %s failed: %s" % (op, reply[:200]))
+
+    def remote_ports(self):
+        b = self._body(self._send("list"))
+        servers = b if isinstance(b, list) else (b or {}).get("servers", [])
+        return {int(x["server_port"]) for x in servers}
+
+    def load(self):
+        try:
+            with open(self.state_file) as f:
+                return {int(k): v for k, v in json.load(f).items()}
+        except (OSError, ValueError):
+            return {}
+
+    def save(self, applied):
+        os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+        tmp = self.state_file + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({str(k): v for k, v in applied.items()}, f)
+        os.replace(tmp, self.state_file)
+
+    def collect(self):
+        stat = self._body(self._send("ping")) or {}
+        owners = self.load()
+        counters = {}
+        for port, n in stat.items():
+            o = owners.get(int(port))
+            if o:
+                counters[o["username"]] = int(n)
+        online = 0
+        try:  # conn-stat needs the Jackchen0514/shadowsocks-rust fork >= v1.23.9
+            b = self._body(self._send("conn-stat"))
+            servers = b if isinstance(b, list) else (b or {}).get("servers", [])
+            online = sum(int(x.get("tcp_conn_count", 0)) for x in servers)
+        except AgentError:
+            pass
+        return counters, online
+
+    def apply(self, state):
+        method = state.get("method") or "aes-256-gcm"
+        want = {int(p["port"]): {"password": p["password"], "method": method, "username": p["username"]}
+                for p in state.get("ports", [])}
+        applied = self.load()
+        remote = self.remote_ports()
+        changed = 0
+        for port in sorted(remote - set(want)):
+            self._ok(self._send("remove: " + json.dumps({"server_port": port})), "remove")
+            applied.pop(port, None)
+            changed += 1
+        for port, w in sorted(want.items()):
+            a = applied.get(port)
+            if port in remote and a and a["password"] == w["password"] and a["method"] == w["method"]:
+                applied[port] = w  # owner may have been renamed
+                continue
+            if port in remote:
+                self._ok(self._send("remove: " + json.dumps({"server_port": port})), "remove")
+            elif port not in applied:
+                open_firewall(port)
+            self._ok(self._send("add: " + json.dumps({"server_port": port, "password": w["password"],
+                                                      "method": w["method"]})), "add")
+            applied[port] = w
+            changed += 1
+        for port in list(applied):
+            if port not in want:
+                applied.pop(port)
+        self.save(applied)
+        return changed
+
+
+DRIVERS = {"anytls": lambda c: AnyTLS(c), "shadowsocks": lambda c: Shadowsocks(c, c["token"])}
+
+
+# ---------------------------------------------------------------------------
+class Agent:
+    def __init__(self, config_path):
+        self.config_path = config_path
+        self.errors = {}  # token -> last apply error, reported on the next cycle
+
+    def load_config(self):
+        with open(self.config_path) as f:
+            cfg = json.load(f)
+        if not cfg.get("panel") or not isinstance(cfg.get("nodes"), list):
+            raise AgentError("%s: 'panel' and 'nodes' are required" % self.config_path)
+        return cfg
+
+    def cycle_node(self, panel, node):
+        token = node["token"]
+        if node.get("type") not in DRIVERS:
+            raise AgentError("unknown node type %r" % node.get("type"))
+        drv = DRIVERS[node["type"]](node)
+        base = "%s/agent/%s" % (panel.rstrip("/"), token)
+        report = {"counters": {}, "online": 0, "version": VERSION, "error": self.errors.pop(token, "")}
+        try:
+            report["counters"], report["online"] = drv.collect()
+        except AgentError as e:
+            report["error"] = report["error"] or str(e)
+        http_json("POST", base + "/report", report)
+        state = http_json("GET", base + "/state")
+        if state.get("type") != node["type"]:
+            raise AgentError("panel says node %s is %s, config says %s" % (token[:8], state.get("type"), node["type"]))
+        try:
+            changed = drv.apply(state)
+        except AgentError as e:
+            self.errors[token] = str(e)
+            raise
+        if changed:
+            log.info("%s node %s: applied %d change(s)", node["type"], state.get("name", token[:8]), changed)
+
+    def run_once(self):
+        cfg = self.load_config()
+        ok = True
+        for node in cfg["nodes"]:
+            try:
+                self.cycle_node(cfg["panel"], node)
+            except Exception as e:
+                ok = False
+                log.warning("%s node %s: %s", node.get("type"), str(node.get("token", ""))[:8], e)
+        return ok, max(5, int(cfg.get("interval", 30)))
+
+    def run(self):
+        while True:
+            try:
+                _, interval = self.run_once()
+            except Exception as e:
+                log.error("%s", e)
+                interval = 30
+            time.sleep(interval)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description="allinone node agent (anytls / shadowsocks)")
+    p.add_argument("--config", default=os.environ.get("AIO_AGENT_CONFIG", "/etc/allinone/agent.json"))
+    p.add_argument("--once", action="store_true", help="run one cycle and exit (non-zero on errors)")
+    p.add_argument("--version", action="version", version=VERSION)
+    a = p.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    agent = Agent(a.config)
+    if a.once:
+        ok, _ = agent.run_once()
+        return 0 if ok else 1
+    agent.run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

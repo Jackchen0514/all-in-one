@@ -1,0 +1,8 @@
+{
+  "panel": "https://panel.example.com",
+  "interval": 30,
+  "nodes": [
+    {"token": "<anytls 节点 token>", "type": "anytls", "api": "https://127.0.0.1:8843", "api_key": "<anytls-server -api-key>"},
+    {"token": "<shadowsocks 节点 token>", "type": "shadowsocks", "manager": "127.0.0.1:6100"}
+  ]
+}

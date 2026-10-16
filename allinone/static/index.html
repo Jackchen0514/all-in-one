@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AllInOne 管理面板</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--text:#1f2329;--muted:#6b7280;--line:#e5e7eb;--pri:#2563eb;--pri-h:#1d4ed8;--ok:#16a34a;--warn:#d97706;--err:#dc2626;--grey:#9ca3af}
+@media (prefers-color-scheme:dark){:root{--bg:#111318;--card:#1a1d24;--text:#e5e7eb;--muted:#9ca3af;--line:#2b303b;--pri:#3b82f6;--pri-h:#60a5fa}}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+header{display:flex;align-items:center;gap:24px;padding:0 20px;height:56px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header h1{font-size:16px;margin:0;white-space:nowrap}
+nav{display:flex;gap:4px;flex:1}
+nav a{padding:6px 12px;border-radius:6px;color:var(--muted);text-decoration:none;cursor:pointer}
+nav a.on{background:var(--bg);color:var(--text);font-weight:600}
+#ver{color:var(--muted);font-size:12px;white-space:nowrap;text-decoration:none;font-variant-numeric:tabular-nums}
+a#ver:hover{color:var(--pri)}
+#verFoot{display:none;text-align:center;color:var(--muted);font-size:12px;padding:8px 0 20px}
+main{max-width:1200px;margin:0 auto;padding:20px 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.stat .k{color:var(--muted);font-size:12px}.stat .v{font-size:24px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+input,select,textarea{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 10px;min-width:0}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--pri);outline-offset:-1px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:6px;padding:6px 12px;cursor:pointer;white-space:nowrap}
+button:hover{border-color:var(--pri)}
+button.pri{background:var(--pri);border-color:var(--pri);color:#fff}button.pri:hover{background:var(--pri-h)}
+button.danger{color:var(--err)}button.sm{padding:2px 8px;font-size:12px}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--muted);font-weight:500;font-size:12px;white-space:nowrap}
+td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;border:1px solid currentColor}
+.s-active{color:var(--ok)}.s-disabled{color:var(--grey)}.s-expired{color:var(--err)}.s-overlimit{color:var(--warn)}
+.prog{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:4px;min-width:100px}
+.prog>i{display:block;height:100%;background:var(--pri)}
+.muted{color:var(--muted);font-size:12px}
+.acts{display:flex;gap:4px;flex-wrap:wrap}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--text);padding:0;width:min(560px,calc(100vw - 32px))}
+dialog::backdrop{background:rgba(0,0,0,.4)}
+dialog form{padding:20px}
+dialog h3{margin:0 0 16px}
+.f{display:grid;grid-template-columns:110px 1fr;gap:10px 12px;align-items:center}
+.f label{color:var(--muted)}
+.f input,.f select,.f textarea{width:100%}
+.foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;font-size:12px;max-height:50vh;white-space:pre-wrap;word-break:break-all}
+#login{max-width:340px;margin:12vh auto}
+#login input{width:100%;margin-bottom:10px}
+#toast{position:fixed;right:16px;bottom:16px;background:var(--text);color:var(--bg);padding:8px 14px;border-radius:8px;opacity:0;transition:.2s;pointer-events:none;z-index:99}
+#toast.on{opacity:1}
+.hide{display:none!important}
+.t-hysteria2{color:#7c3aed}.t-anytls{color:#0891b2}.t-shadowsocks{color:#db2777}
+.pager{display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:12px}
+@media (max-width:640px){header{gap:10px;padding:0 12px}header h1,#ver{display:none}#verFoot{display:block}.f{grid-template-columns:1fr}.f label{margin-bottom:-6px}}
+</style>
+</head>
+<body>
+<div id="login" class="card hide">
+  <h3 style="margin-top:0">AllInOne 管理面板</h3>
+  <form id="loginForm">
+    <input name="username" placeholder="用户名" autocomplete="username" required>
+    <input name="password" type="password" placeholder="密码" autocomplete="current-password" required>
+    <button class="pri" style="width:100%">登录</button>
+  </form>
+</div>
+
+<div id="app" class="hide">
+<header>
+  <h1>AllInOne 管理</h1>
+  <nav>
+    <a data-p="dash">概览</a><a data-p="users">用户</a><a data-p="nodes">节点</a><a data-p="api">API</a>
+  </nav>
+  <a id="ver" target="_blank" rel="noopener"></a>
+  <button class="sm" id="logout">退出</button>
+</header>
+<main>
+  <section id="p-dash">
+    <div class="grid" id="statGrid"></div>
+    <div class="bar" style="margin-top:16px"><button id="syncAll">立即同步流量</button><span class="muted" id="syncMsg"></span></div>
+  </section>
+
+  <section id="p-users" class="hide">
+    <div class="bar">
+      <input id="uSearch" placeholder="搜索用户名/备注" style="flex:1;max-width:280px">
+      <select id="uStatus">
+        <option value="">全部状态</option><option value="active">正常</option><option value="expired">已过期</option>
+        <option value="overlimit">流量超额</option><option value="disabled">已禁用</option>
+      </select>
+      <span style="flex:1"></span>
+      <button class="pri" id="uAdd">+ 新建用户</button>
+    </div>
+    <div class="card tbl"><table>
+      <thead><tr><th>用户名</th><th>状态</th><th>流量 (已用 / 总量)</th><th>到期时间</th><th>重置日</th><th>备注</th><th>操作</th></tr></thead>
+      <tbody id="uBody"></tbody>
+    </table></div>
+    <div class="pager"><span class="muted" id="uTotal"></span><button class="sm" id="uPrev">上一页</button><button class="sm" id="uNext">下一页</button></div>
+  </section>
+
+  <section id="p-nodes" class="hide">
+    <div class="bar"><span style="flex:1"></span><button class="pri" id="nAdd">+ 新建节点</button></div>
+    <div class="card tbl"><table>
+      <thead><tr><th>名称</th><th>类型</th><th>地址</th><th>在线连接</th><th>流量同步</th><th>配置下发</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="nBody"></tbody>
+    </table></div>
+  </section>
+
+  <section id="p-api" class="hide">
+    <div class="card">
+      <p>所有接口前缀 <code>/api/v1</code>，请求头携带 <code>Authorization: Bearer &lt;token&gt;</code>。token 可以是配置的 <code>AIO_API_TOKEN</code>，或通过 <code>POST /api/v1/login</code> 获取。</p>
+      <p>当前会话 token（可用于临时调试）：</p>
+      <pre id="curToken"></pre>
+      <p>完整文档见项目 <code>README.md</code>。示例：</p>
+      <pre id="apiExample"></pre>
+    </div>
+  </section>
+</main>
+<div id="verFoot"></div>
+</div>
+
+<dialog id="userDlg"><form method="dialog" id="userForm">
+  <h3 id="userDlgTitle">新建用户</h3>
+  <div class="f">
+    <label>用户名</label><input name="username" required pattern="[A-Za-z0-9_.@\-]{1,64}">
+    <label>连接密码</label><input name="password" placeholder="留空自动生成" autocomplete="off">
+    <label>流量限额 (GB)</label><input name="traffic_limit_gb" type="number" min="0" step="any" placeholder="0 = 不限">
+    <label>到期时间</label><input name="expire_at" type="datetime-local">
+    <label>快速设置</label><div class="acts">
+      <button type="button" class="sm" data-days="0">永不过期</button><button type="button" class="sm" data-days="7">7 天后</button>
+      <button type="button" class="sm" data-days="30">30 天后</button><button type="button" class="sm" data-days="90">90 天后</button><button type="button" class="sm" data-days="365">1 年后</button></div>
+    <label>流量倍数</label><input name="traffic_multiplier" type="number" min="0" max="100" step="0.1" value="1" title="计入的流量 = 实际流量 × 倍数，0 = 不计流量">
+    <label>每月重置日</label><input name="reset_day" type="number" min="0" max="28" placeholder="0 = 不自动重置">
+    <label>SS 端口</label><input name="ss_port" type="number" min="1" max="65535" placeholder="留空自动分配" title="该用户在所有 Shadowsocks 节点上的端口">
+    <label>启用</label><select name="enabled"><option value="1">是</option><option value="0">否</option></select>
+    <label>备注</label><input name="note">
+  </div>
+  <div class="foot"><button value="cancel" formnovalidate>取消</button><button class="pri" value="ok">保存</button></div>
+</form></dialog>
+
+<dialog id="nodeDlg"><form method="dialog" id="nodeForm">
+  <h3 id="nodeDlgTitle">新建节点</h3>
+  <div class="f">
+    <label>类型</label><select name="type"><option value="hysteria2">Hysteria2</option><option value="anytls">AnyTLS</option><option value="shadowsocks">Shadowsocks</option></select>
+    <label>名称</label><input name="name" required>
+    <label>连接地址</label><input name="address" required placeholder="域名或 IP">
+    <label data-t="hysteria2 anytls">端口</label><input data-t="hysteria2 anytls" name="port" value="443" placeholder="监听端口，如 443">
+    <label data-t="shadowsocks">加密方式</label><select data-t="shadowsocks" name="ss_method"><option>aes-256-gcm</option><option>aes-128-gcm</option><option>chacha20-ietf-poly1305</option></select>
+    <label data-t="hysteria2">端口跳跃</label><input data-t="hysteria2" name="hop_ports" placeholder="如 20000-30000，留空关闭" title="节点会用 iptables 把这段 UDP 端口转发到监听端口；云服务器安全组需放行这段端口">
+    <label data-t="hysteria2">跳跃间隔 (秒)</label><input data-t="hysteria2" name="hop_interval" type="number" min="5" max="3600" value="30">
+    <label data-t="hysteria2 anytls">SNI</label><input data-t="hysteria2 anytls" name="sni" placeholder="可选">
+    <label data-t="hysteria2 anytls">跳过证书验证</label><select data-t="hysteria2 anytls" name="insecure"><option value="0">否</option><option value="1">是 (自签证书)</option></select>
+    <label data-t="hysteria2">混淆密码</label><input data-t="hysteria2" name="obfs_password" placeholder="salamander，留空关闭">
+    <label data-t="hysteria2">统计 API</label><input data-t="hysteria2" name="api_url" placeholder="http://节点IP:9999">
+    <label data-t="hysteria2">API Secret</label><input data-t="hysteria2" name="api_secret">
+    <p data-t="shadowsocks" class="muted" style="grid-column:1/-1;margin:0">每个用户在所有 Shadowsocks 节点上使用自己的「SS 端口」，由节点上的 allinone-agent 下发到 ssmanager。</p>
+    <label>排序</label><input name="sort" type="number" value="0">
+    <label>启用</label><select name="enabled"><option value="1">是</option><option value="0">否</option></select>
+  </div>
+  <div class="foot"><button value="cancel" formnovalidate>取消</button><button class="pri" value="ok">保存</button></div>
+</form></dialog>
+
+<dialog id="infoDlg"><form method="dialog">
+  <h3 id="infoTitle"></h3><div id="infoBody"></div>
+  <div class="foot"><button class="pri">关闭</button></div>
+</form></dialog>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const GB = 1024 ** 3;
+let token = "";
+try { token = localStorage.getItem("aio_token") || ""; } catch (e) {}
+
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), 2200); }
+function fmtBytes(n) { if (!n) return "0"; const u = ["B","KB","MB","GB","TB","PB"]; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return n.toFixed(i ? 2 : 0) + " " + u[i]; }
+function fmtTime(ts) { if (!ts) return "永久"; const d = new Date(ts * 1000); return d.toLocaleString("zh-CN", {hour12: false}); }
+function rel(ts) { if (!ts) return "从未"; const s = Math.floor(Date.now() / 1000) - ts; if (s < 60) return s + " 秒前"; if (s < 3600) return Math.floor(s / 60) + " 分钟前"; if (s < 86400) return Math.floor(s / 3600) + " 小时前"; return Math.floor(s / 86400) + " 天前"; }
+function daysLeft(ts) { if (!ts) return ""; const d = (ts * 1000 - Date.now()) / 86400000; return d > 0 ? `剩 ${d < 1 ? d.toFixed(1) : Math.floor(d)} 天` : "已过期"; }
+async function copy(text) { try { await navigator.clipboard.writeText(text); toast("已复制"); } catch (e) { prompt("复制：", text); } }
+const STATUS = {active: "正常", disabled: "已禁用", expired: "已过期", overlimit: "流量超额"};
+
+async function api(method, path, body) {
+  const r = await fetch("/api/v1" + path, {method, headers: {"Content-Type": "application/json", "Authorization": "Bearer " + token}, body: body ? JSON.stringify(body) : undefined});
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && path !== "/login") { showLogin(); throw new Error("请重新登录"); }
+  if (!r.ok) { const e = new Error(data.error || r.statusText); toast("错误：" + e.message); throw e; }
+  return data;
+}
+
+function showLogin() { $("#app").classList.add("hide"); $("#login").classList.remove("hide"); }
+$("#loginForm").onsubmit = async e => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  try {
+    const r = await api("POST", "/login", {username: f.get("username"), password: f.get("password")});
+    token = r.token; try { localStorage.setItem("aio_token", token); } catch (e) {}
+    start();
+  } catch (e) {}
+};
+$("#logout").onclick = () => { token = ""; try { localStorage.removeItem("aio_token"); } catch (e) {} showLogin(); };
+
+// ---- navigation ----
+let page = "dash";
+document.querySelectorAll("nav a").forEach(a => a.onclick = () => go(a.dataset.p));
+function go(p) {
+  page = p; try { localStorage.setItem("aio_page", p); } catch (e) {}
+  document.querySelectorAll("nav a").forEach(a => a.classList.toggle("on", a.dataset.p === p));
+  document.querySelectorAll("main>section").forEach(s => s.classList.toggle("hide", s.id !== "p-" + p));
+  ({dash: loadStats, users: loadUsers, nodes: loadNodes, api: loadApi})[p]();
+}
+
+// ---- dashboard ----
+async function loadStats() {
+  const s = await api("GET", "/stats");
+  const items = [["用户总数", s.users.total], ["正常", s.users.active], ["已过期", s.users.expired], ["流量超额", s.users.overlimit], ["已禁用", s.users.disabled],
+    ["节点 (启用/总数)", s.nodes.enabled + " / " + s.nodes.total],
+    ["节点类型", `HY2 ${s.nodes.by_type.hysteria2} · AnyTLS ${s.nodes.by_type.anytls} · SS ${s.nodes.by_type.shadowsocks}`], ["在线连接", s.nodes.online_connections],
+    ["累计上传", fmtBytes(s.traffic.upload)], ["累计下载", fmtBytes(s.traffic.download)], ["24 小时流量", fmtBytes(s.traffic.last_24h_upload + s.traffic.last_24h_download)]];
+  $("#statGrid").innerHTML = items.map(([k, v]) => `<div class="card stat"><div class="k">${k}</div><div class="v">${esc(v)}</div></div>`).join("");
+}
+$("#syncAll").onclick = async () => {
+  $("#syncMsg").textContent = "同步中…";
+  const r = await api("POST", "/sync");
+  const errs = Object.values(r).filter(x => x.error).length;
+  $("#syncMsg").textContent = `完成：${Object.keys(r).length} 个节点` + (errs ? `，${errs} 个失败` : "");
+  loadStats();
+};
+
+// ---- users ----
+let uOffset = 0; const uLimit = 50; let users = [];
+async function loadUsers() {
+  const q = new URLSearchParams({search: $("#uSearch").value, status: $("#uStatus").value, limit: uLimit, offset: uOffset});
+  const r = await api("GET", "/users?" + q);
+  users = r.items;
+  $("#uTotal").textContent = `共 ${r.total} 个，第 ${Math.floor(uOffset / uLimit) + 1} 页`;
+  $("#uPrev").disabled = uOffset === 0; $("#uNext").disabled = uOffset + uLimit >= r.total;
+  $("#uBody").innerHTML = users.map((u, i) => {
+    const pct = u.traffic_limit ? Math.min(100, u.used / u.traffic_limit * 100) : 0;
+    return `<tr>
+      <td><b>${esc(u.username)}</b><div class="muted">SS 端口 ${u.ss_port || "-"}</div></td>
+      <td><span class="tag s-${u.status}">${STATUS[u.status]}</span></td>
+      <td class="num">${fmtBytes(u.used)} / ${u.traffic_limit ? fmtBytes(u.traffic_limit) : "不限"}
+        <div class="muted">↑${fmtBytes(u.upload)} ↓${fmtBytes(u.download)}${u.traffic_multiplier !== 1 ? ` · <b title="计入的流量 = 实际流量 × ${u.traffic_multiplier}">×${u.traffic_multiplier}</b>` : ""}</div>
+        ${u.traffic_limit ? `<div class="prog"><i style="width:${pct}%"></i></div>` : ""}</td>
+      <td class="num">${fmtTime(u.expire_at)}<div class="muted">${daysLeft(u.expire_at)}</div></td>
+      <td>${u.reset_day ? "每月 " + u.reset_day + " 日" : "-"}</td>
+      <td class="muted">${esc(u.note)}</td>
+      <td><div class="acts">
+        <button class="sm" data-a="edit" data-i="${i}">编辑</button>
+        <button class="sm" data-a="extend" data-i="${i}">续期</button>
+        <button class="sm" data-a="traffic" data-i="${i}">加流量</button>
+        <button class="sm" data-a="reset" data-i="${i}">重置流量</button>
+        <button class="sm" data-a="toggle" data-i="${i}">${u.enabled ? "禁用" : "启用"}</button>
+        <button class="sm" data-a="sub" data-i="${i}">订阅</button>
+        <button class="sm danger" data-a="del" data-i="${i}">删除</button>
+      </div></td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted" style="text-align:center;padding:30px">暂无用户</td></tr>`;
+}
+let sTimer; $("#uSearch").oninput = () => { clearTimeout(sTimer); sTimer = setTimeout(() => { uOffset = 0; loadUsers(); }, 300); };
+$("#uStatus").onchange = () => { uOffset = 0; loadUsers(); };
+$("#uPrev").onclick = () => { uOffset = Math.max(0, uOffset - uLimit); loadUsers(); };
+$("#uNext").onclick = () => { uOffset += uLimit; loadUsers(); };
+
+$("#uBody").onclick = async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const u = users[b.dataset.i]; const n = encodeURIComponent(u.username);
+  switch (b.dataset.a) {
+    case "edit": return openUser(u);
+    case "extend": { const d = prompt(`为 ${u.username} 续期天数（负数为减少）：`, "30"); if (d === null) return; await api("POST", `/users/${n}/extend`, {days: Number(d)}); toast("已续期"); break; }
+    case "traffic": { const g = prompt(`为 ${u.username} 增加流量 (GB，负数为减少)：`, "100"); if (g === null) return; await api("POST", `/users/${n}/add-traffic`, {gb: Number(g)}); toast("已调整流量"); break; }
+    case "reset": if (!confirm(`确认将 ${u.username} 的已用流量清零？`)) return; await api("POST", `/users/${n}/reset-traffic`); toast("已重置"); break;
+    case "toggle": await api("PATCH", `/users/${n}`, {enabled: !u.enabled}); break;
+    case "del": if (!confirm(`确认删除用户 ${u.username}？`)) return; await api("DELETE", `/users/${n}`); toast("已删除"); break;
+    case "sub": return showSub(u);
+  }
+  loadUsers();
+};
+
+async function showSub(u0) {
+  const u = await api("GET", "/users/" + encodeURIComponent(u0.username));
+  const sub = u.subscription_url.startsWith("http") ? u.subscription_url : location.origin + u.subscription_url;
+  $("#infoTitle").textContent = "订阅 - " + u.username;
+  $("#infoBody").innerHTML = `
+    <p class="muted">通用订阅 (v2rayN / Shadowrocket / NekoBox 等, base64)</p>
+    <div class="bar"><input readonly value="${esc(sub)}" style="flex:1"><button type="button" data-c="${esc(sub)}">复制</button></div>
+    <p class="muted">Clash Meta / Mihomo</p>
+    <div class="bar"><input readonly value="${esc(sub)}?format=clash" style="flex:1"><button type="button" data-c="${esc(sub)}?format=clash">复制</button></div>
+    <p class="muted">连接密码（所有协议通用）：<code>${esc(u.password)}</code> · SS 端口：<code>${u.ss_port || "-"}</code></p>
+    <p class="muted">节点链接 (${u.links.length})</p>
+    ${u.links.map(l => `<div class="bar"><input readonly value="${esc(l)}" style="flex:1"><button type="button" data-c="${esc(l)}">复制</button></div>`).join("") || '<p class="muted">没有启用的节点</p>'}
+    <div class="bar" style="margin-top:12px"><button type="button" class="danger" id="regen">重新生成密码和订阅地址</button></div>`;
+  $("#infoBody").querySelectorAll("[data-c]").forEach(b => b.onclick = () => copy(b.dataset.c));
+  $("#regen").onclick = async () => { if (!confirm("旧密码和订阅地址将立即失效，确认？")) return; await api("POST", `/users/${encodeURIComponent(u.username)}/regenerate`, {}); showSub(u); };
+  if (!$("#infoDlg").open) $("#infoDlg").showModal();
+}
+
+// user dialog
+let editing = null;
+function toLocalInput(ts) { if (!ts) return ""; const d = new Date(ts * 1000); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); }
+$("#userForm").querySelectorAll("[data-days]").forEach(b => b.onclick = () => {
+  const d = Number(b.dataset.days);
+  $("#userForm").expire_at.value = d ? toLocalInput(Math.floor(Date.now() / 1000) + d * 86400) : "";
+});
+function openUser(u) {
+  editing = u ? u.username : null;
+  const f = $("#userForm"); f.reset(); $("#userDlg").returnValue = "";
+  $("#userDlgTitle").textContent = u ? "编辑用户 " + u.username : "新建用户";
+  if (u) {
+    f.username.value = u.username; f.password.value = u.password;
+    f.traffic_limit_gb.value = u.traffic_limit ? +(u.traffic_limit / GB).toFixed(3) : "";
+    f.expire_at.value = toLocalInput(u.expire_at); f.reset_day.value = u.reset_day || "";
+    f.traffic_multiplier.value = u.traffic_multiplier; f.ss_port.value = u.ss_port || "";
+    f.enabled.value = u.enabled ? "1" : "0"; f.note.value = u.note;
+  }
+  $("#userDlg").showModal();
+}
+$("#uAdd").onclick = () => openUser(null);
+$("#userDlg").onclose = async () => {
+  if ($("#userDlg").returnValue !== "ok") return;
+  const f = $("#userForm");
+  const body = {username: f.username.value.trim(), traffic_limit_gb: Number(f.traffic_limit_gb.value || 0),
+    expire_at: f.expire_at.value ? Math.floor(new Date(f.expire_at.value).getTime() / 1000) : 0,
+    reset_day: Number(f.reset_day.value || 0), enabled: f.enabled.value === "1", note: f.note.value,
+    traffic_multiplier: f.traffic_multiplier.value === "" ? 1 : Number(f.traffic_multiplier.value)};
+  if (f.password.value) body.password = f.password.value;
+  if (f.ss_port.value) body.ss_port = Number(f.ss_port.value);
+  try {
+    if (editing) await api("PATCH", "/users/" + encodeURIComponent(editing), body);
+    else await api("POST", "/users", body);
+    toast("已保存"); loadUsers();
+  } catch (e) { $("#userDlg").showModal(); }
+};
+
+// ---- nodes ----
+let nodes = [];
+async function loadNodes() {
+  nodes = (await api("GET", "/nodes")).items;
+  $("#nBody").innerHTML = nodes.map((n, i) => `<tr>
+    <td><b>${esc(n.name)}</b></td>
+    <td><span class="tag t-${n.type}">${TYPES[n.type]}</span></td>
+    <td class="num">${nodeAddr(n)}</td>
+    <td class="num">${n.online}</td>
+    <td>${rel(n.last_sync_at)}${n.last_error ? `<div class="muted" style="color:var(--err)">${esc(n.last_error)}</div>` : ""}</td>
+    <td>${agentStatus(n)}</td>
+    <td><span class="tag ${n.enabled ? "s-active" : "s-disabled"}">${n.enabled ? "启用" : "停用"}</span></td>
+    <td><div class="acts">
+      <button class="sm" data-a="edit" data-i="${i}">编辑</button>
+      <button class="sm" data-a="config" data-i="${i}">服务端配置</button>
+      ${n.type === "hysteria2" ? `<button class="sm" data-a="sync" data-i="${i}">同步</button>` : ""}
+      <button class="sm danger" data-a="del" data-i="${i}">删除</button></div></td></tr>`).join("")
+    || `<tr><td colspan="8" class="muted" style="text-align:center;padding:30px">暂无节点</td></tr>`;
+}
+const TYPES = {hysteria2: "Hysteria2", anytls: "AnyTLS", shadowsocks: "Shadowsocks"};
+function nodeAddr(n) {
+  if (n.type === "shadowsocks") return `${esc(n.address)} <div class="muted">${esc(n.ss_method)} · 每用户端口</div>`;
+  if (n.type === "anytls") return `${esc(n.address)}:${esc(n.port)}<div class="muted">TCP</div>`;
+  return `${esc(n.address)}:${esc(n.port)}${n.obfs_password ? ' <span class="muted">obfs</span>' : ""}${n.hop_ports ? `<div class="muted">端口跳跃 ${esc(n.hop_ports)}</div>` : ""}`;
+}
+$("#nBody").onclick = async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const n = nodes[b.dataset.i];
+  switch (b.dataset.a) {
+    case "edit": return openNode(n);
+    case "del": if (!confirm(`确认删除节点 ${n.name}？`)) return; await api("DELETE", "/nodes/" + n.id); break;
+    case "sync": try { const r = await api("POST", `/nodes/${n.id}/sync`); toast(`同步成功：${r.users} 个用户有流量，在线 ${r.online}`); } catch (e) {} break;
+    case "config": {
+      const r = await api("GET", `/nodes/${n.id}/config`);
+      $("#infoTitle").textContent = "服务端配置 - " + n.name;
+      if (r.agent_config) {
+        $("#infoBody").innerHTML = `<p class="muted">推荐在节点上用 <code>install.sh node --type ${n.type === "anytls" ? "anytls" : "ss"}</code> 安装，会自动注册并配置 allinone-agent。</p>
+          <p class="muted">手动部署时，把下面的内容写入节点的 <code>/etc/allinone/agent.json</code>（多个节点合并到同一个 <code>nodes</code> 数组），然后启动 <code>allinone-agent</code>。节点只需要能访问本面板。</p>
+          <pre>${esc(r.agent_config)}</pre><div class="bar"><button type="button" id="cpy">复制配置</button></div>`;
+        $("#cpy").onclick = () => copy(r.agent_config);
+        $("#infoDlg").showModal(); return;
+      }
+      $("#infoBody").innerHTML = `<p class="muted">将以下内容写入节点的 <code>/etc/hysteria/config.yaml</code> 并重启 hysteria。认证回调地址必须能从节点访问到本面板。</p>
+        <pre>${esc(r.yaml)}</pre><div class="bar"><button type="button" id="cpy">复制配置</button></div>`;
+      $("#cpy").onclick = () => copy(r.yaml);
+      $("#infoDlg").showModal(); return;
+    }
+  }
+  loadNodes();
+};
+function agentStatus(n) {
+  if (n.type !== "hysteria2") {
+    if (!n.agent_seen_at) return '<span class="muted" title="节点上的 allinone-agent 还没有连上面板">agent 未连接</span>';
+    return `<span class="tag ${n.agent_synced ? "s-active" : "s-expired"}">${n.agent_synced ? "agent 在线" : "agent 离线"}</span><div class="muted">${n.agent_version ? "v" + esc(n.agent_version) + " · " : ""}${rel(n.agent_seen_at)}</div>`;
+  }
+  if (!n.agent_seen_at) return '<span class="muted" title="节点未安装 hy2mgr-node-sync，修改端口/混淆需手动改 config.yaml">未安装同步</span>';
+  const stale = Date.now() / 1000 - n.agent_seen_at > 300;
+  if (n.agent_synced) return `<span class="tag ${stale ? "s-overlimit" : "s-active"}">已应用</span><div class="muted">${rel(n.agent_seen_at)}</div>`;
+  return `<span class="tag s-overlimit">待应用</span><div class="muted">节点端口 ${esc(n.agent_port || "?")} · ${rel(n.agent_seen_at)}</div>`;
+}
+let editingNode = null;
+function openNode(n) {
+  editingNode = n ? n.id : null;
+  const f = $("#nodeForm"); f.reset(); $("#nodeDlg").returnValue = "";
+  $("#nodeDlgTitle").textContent = n ? "编辑节点" : "新建节点";
+  if (n) for (const k of ["type", "name", "address", "port", "ss_method", "sni", "obfs_password", "hop_ports", "hop_interval", "api_url", "api_secret", "sort"]) f[k].value = n[k];
+  nodeTypeFields();
+  if (n) { f.insecure.value = n.insecure ? "1" : "0"; f.enabled.value = n.enabled ? "1" : "0"; }
+  $("#nodeDlg").showModal();
+}
+$("#nAdd").onclick = () => openNode(null);
+function nodeTypeFields() {
+  const t = $("#nodeForm").type.value;
+  $("#nodeForm").querySelectorAll("[data-t]").forEach(el => el.classList.toggle("hide", !el.dataset.t.split(" ").includes(t)));
+}
+$("#nodeForm").type.onchange = nodeTypeFields;
+$("#nodeDlg").onclose = async () => {
+  if ($("#nodeDlg").returnValue !== "ok") return;
+  const f = $("#nodeForm"); const body = {};
+  for (const k of ["name", "address", "port", "sni", "obfs_password", "hop_ports", "api_url", "api_secret"]) body[k] = f[k].value.trim();
+  body.type = f.type.value; body.ss_method = f.ss_method.value;
+  body.hop_interval = Number(f.hop_interval.value || 30);
+  body.sort = Number(f.sort.value || 0); body.insecure = f.insecure.value === "1"; body.enabled = f.enabled.value === "1";
+  try {
+    if (editingNode) await api("PATCH", "/nodes/" + editingNode, body); else await api("POST", "/nodes", body);
+    toast(editingNode ? "已保存，节点将在 1 分钟内应用修改" : "已保存"); loadNodes();
+  } catch (e) { $("#nodeDlg").showModal(); }
+};
+
+// ---- api page ----
+function loadApi() {
+  $("#curToken").textContent = token;
+  $("#apiExample").textContent =
+`# 新建用户：100GB，30 天
+curl -X POST ${location.origin}/api/v1/users -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" -d '{"username":"alice","traffic_limit_gb":100,"expire_days":30}'
+
+# 续期 30 天
+curl -X POST ${location.origin}/api/v1/users/alice/extend -H "Authorization: Bearer $TOKEN" -d '{"days":30}'
+
+# 重置流量
+curl -X POST ${location.origin}/api/v1/users/alice/reset-traffic -H "Authorization: Bearer $TOKEN"`;
+}
+
+async function loadVersion() {
+  try {
+    const v = await api("GET", "/version");
+    const el = $("#ver"), short = (v.commit || "").slice(0, 7);
+    el.textContent = $("#verFoot").textContent = "v" + v.version + (short ? " · " + short : "");
+    el.title = v.commit ? "当前版本 " + v.commit : "当前版本";
+    if (/^[0-9a-f]{40}$/.test(v.commit)) el.href = v.repo + "/commit/" + v.commit; else el.removeAttribute("href");
+  } catch (e) {}
+}
+async function start() {
+  $("#login").classList.add("hide"); $("#app").classList.remove("hide");
+  loadVersion();
+  let p = "dash"; try { p = localStorage.getItem("aio_page") || "dash"; } catch (e) {}
+  go(p);
+}
+if (token) start(); else showLogin();
+</script>
+</body>
+</html>

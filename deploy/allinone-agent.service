@@ -1,0 +1,11 @@
+[Unit]
+Description=allinone node agent (anytls / shadowsocks)
+After=network-online.target anytls-server.service ssmanager.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/allinone-agent --config /etc/allinone/agent.json
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
