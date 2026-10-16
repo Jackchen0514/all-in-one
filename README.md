@@ -1,5 +1,7 @@
 # allinone
 
+[![test](https://github.com/Jackchen0514/all-in-one/actions/workflows/test.yml/badge.svg)](https://github.com/Jackchen0514/all-in-one/actions/workflows/test.yml)
+
 **Hysteria2 + AnyTLS + Shadowsocks** 的多节点统一管理面板：一个用户、一套到期时间 / 流量限额 / 流量倍数 / 月度重置，一个订阅链接同时输出三种协议的全部节点。
 
 由三个项目整合而来：

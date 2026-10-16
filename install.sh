@@ -533,8 +533,8 @@ install_hysteria_node() {
   secret="${secret:-$(rand 32)}"
 
   # An already registered node keeps the port / obfs set in the panel unless overridden here.
-  local existing="" cur_port="" cur_obfs="" cur_hop="" _m=""
-  IFS=$'\x1f' read -r existing cur_port cur_obfs cur_hop _m < <(find_node hysteria2) || true
+  local existing="" cur_port="" cur_obfs="" cur_hop=""
+  IFS=$'\x1f' read -r existing cur_port cur_obfs cur_hop _ < <(find_node hysteria2) || true
   if [ -n "$existing" ]; then
     [ "$PORT_SET" = 1 ] || port_spec="$cur_port"
     [ "$OBFS" = 0 ] || obfs_pw="$cur_obfs"
@@ -896,6 +896,7 @@ EOF
 
 # ---- node: anytls ----------------------------------------------------------
 # install_anytls_bin [VERSION] -> installs anytls-server from the anytls-go GitHub release (SHA256SUMS verified)
+# shellcheck disable=SC2120  # VERSION is passed by upgrade_core
 install_anytls_bin() {
   local ver="${1:-$AT_VERSION}" arch base tmp asset
   arch="$(go_arch)"
@@ -945,8 +946,8 @@ install_anytls_node() {
   fi
 
   # import users of a running standalone anytls-go before the agent takes over
-  local existing="" _p="" _o="" _h="" _m=""
-  IFS=$'\x1f' read -r existing _p _o _h _m < <(find_node anytls) || true
+  local existing=""
+  IFS=$'\x1f' read -r existing _ < <(find_node anytls) || true
   if [ -z "$existing" ] && [ -n "$api_key" ] && systemctl is-active -q anytls-server 2>/dev/null; then
     local api; api="$(unit_flag "$unit" -api-listen)"; api="${api:-$AT_API}"
     local users=""
@@ -1077,8 +1078,8 @@ EOF
 
 install_ss_node() {
   info "[shadowsocks] installing"
-  local existing="" _p="" _o="" _h="" cur_method="" adopted="" import_method=""
-  IFS=$'\x1f' read -r existing _p _o _h cur_method < <(find_node shadowsocks) || true
+  local existing="" cur_method="" adopted="" import_method=""
+  IFS=$'\x1f' read -r existing _ _ _ cur_method < <(find_node shadowsocks) || true
 
   # import the ports of a standalone ssmanager panel on this machine, then retire it
   local old_db="$OLD_SSMANAGER_DIR/backend/data/ssmanager.db"
