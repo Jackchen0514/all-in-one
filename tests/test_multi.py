@@ -378,6 +378,41 @@ class MultiTest(test_api.APITest):
         _, r, _ = self.call("POST", "/api/v1/import", {"source": "ssmanager", "items": rows[:2]})
         self.assertEqual([x["reason"] for x in r["skipped"]], ["exists", "exists"])
 
+    def test_node_traffic_multiplier(self):
+        hy = self.add_node(traffic_multiplier=2)
+        at = self.node(name="AT", type="anytls", address="a", port="8443", traffic_multiplier=0.5)
+        self.assertEqual((hy["traffic_multiplier"], at["traffic_multiplier"]), (2.0, 0.5))
+        for bad in (-1, 101, "x"):
+            self.assertEqual(self.call("PATCH", "/api/v1/nodes/%d" % at["id"], {"traffic_multiplier": bad})[0], 400)
+        self.assertEqual(self.node(name="d", type="shadowsocks", address="d")["traffic_multiplier"], 1.0)
+        self.user("nm", traffic_multiplier=1.5)
+        # hysteria2: panel-side sync -> 100 * 1.5 * 2, 1000 * 1.5 * 2
+        self.fake.traffic = {"nm": {"tx": 100, "rx": 1000}}
+        self.call("POST", "/api/v1/sync")
+        _, u, _ = self.call("GET", "/api/v1/users/nm")
+        self.assertEqual((u["upload"], u["download"]), (300, 3000))
+        # anytls: agent report (first report is a baseline) -> 400 * 1.5 * 0.5
+        url = "/agent/%s/report" % at["auth_token"]
+        self.call("POST", url, {"counters": {"nm": 0}}, token=None)
+        self.call("POST", url, {"counters": {"nm": 400}}, token=None)
+        self.assertEqual(self.call("GET", "/api/v1/users/nm")[1]["download"], 3300)
+        # 0 = this node is free
+        self.call("PATCH", "/api/v1/nodes/%d" % at["id"], {"traffic_multiplier": 0})
+        self.call("POST", url, {"counters": {"nm": 900}}, token=None)
+        self.assertEqual(self.call("GET", "/api/v1/users/nm")[1]["download"], 3300)
+
+    def test_node_multiplier_migration(self):
+        """An existing database (installed before node multipliers) is upgraded in place."""
+        import sqlite3
+        path = os.path.join(self.tmp, "pre.db")
+        c = sqlite3.connect(path)
+        c.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT NOT NULL, address TEXT NOT NULL, "
+                  "port TEXT NOT NULL DEFAULT '443', auth_token TEXT NOT NULL, created_at INTEGER NOT NULL)")
+        c.execute("INSERT INTO nodes(name,address,auth_token,created_at) VALUES('a','b','t',0)")
+        c.commit()
+        c.close()
+        self.assertEqual(DB(path).get_node(1)["traffic_multiplier"], 1.0)
+
     def test_agent_type_mismatch(self):
         fake = FakeAnyTLS()
         self.addCleanup(fake.close)

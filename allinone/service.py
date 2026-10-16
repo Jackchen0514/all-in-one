@@ -168,8 +168,8 @@ class Service:
                 u = self.db.q1("SELECT id, traffic_multiplier FROM users WHERE username=?", (name,))
                 if not u:
                     continue
-                # Quota and history use counted traffic (actual * per-user multiplier).
-                m = u["traffic_multiplier"]
+                # Quota and history use counted traffic (actual * user multiplier * node multiplier).
+                m = u["traffic_multiplier"] * node["traffic_multiplier"]
                 up, down = int(round(up * m)), int(round(down * m))
                 self.db.x("UPDATE users SET upload=upload+?, download=download+? WHERE id=?",
                           (up, down, u["id"]))
@@ -349,7 +349,7 @@ class Service:
                           "ON CONFLICT(node_id,user_id) DO UPDATE SET value=excluded.value",
                           (node["id"], u["id"], val))
                 # Both protocols only expose a combined counter; it is booked as download.
-                counted = int(round(delta * u["traffic_multiplier"]))
+                counted = int(round(delta * u["traffic_multiplier"] * node["traffic_multiplier"]))
                 if counted > 0:
                     users += 1
                     self.db.x("UPDATE users SET download=download+? WHERE id=?", (counted, u["id"]))

@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     address      TEXT NOT NULL,                 -- host clients connect to
     port         TEXT NOT NULL DEFAULT '443',   -- hysteria2 / anytls listen port (unused for shadowsocks)
     ss_method    TEXT NOT NULL DEFAULT 'aes-256-gcm',
+    traffic_multiplier REAL NOT NULL DEFAULT 1.0, -- node rate: counted = actual * user multiplier * this
     sni          TEXT NOT NULL DEFAULT '',
     insecure     INTEGER NOT NULL DEFAULT 0,
     obfs_password TEXT NOT NULL DEFAULT '',     -- salamander obfs, empty = off
@@ -82,7 +83,7 @@ USER_FIELDS = (
     "upload", "download", "reset_day", "traffic_multiplier", "note", "ss_port",
 )
 NODE_FIELDS = (
-    "name", "type", "address", "port", "ss_method", "sni", "insecure", "obfs_password",
+    "name", "type", "address", "port", "ss_method", "traffic_multiplier", "sni", "insecure", "obfs_password",
     "hop_ports", "hop_interval", "api_url", "api_secret", "enabled", "sort",
 )
 NODE_TYPES = ("hysteria2", "anytls", "shadowsocks")
@@ -121,7 +122,8 @@ class DB:
                                  ("users", "ss_port", "INTEGER NOT NULL DEFAULT 0"),
                                  ("nodes", "type", "TEXT NOT NULL DEFAULT 'hysteria2'"),
                                  ("nodes", "ss_method", "TEXT NOT NULL DEFAULT 'aes-256-gcm'"),
-                                 ("nodes", "agent_version", "TEXT NOT NULL DEFAULT ''")):
+                                 ("nodes", "agent_version", "TEXT NOT NULL DEFAULT ''"),
+                                 ("nodes", "traffic_multiplier", "REAL NOT NULL DEFAULT 1.0")):
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(%s)" % table)}
             if name not in cols:
                 self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, ddl))

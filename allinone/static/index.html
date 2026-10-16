@@ -131,7 +131,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
     <label>快速设置</label><div class="acts">
       <button type="button" class="sm" data-days="0">永不过期</button><button type="button" class="sm" data-days="7">7 天后</button>
       <button type="button" class="sm" data-days="30">30 天后</button><button type="button" class="sm" data-days="90">90 天后</button><button type="button" class="sm" data-days="365">1 年后</button></div>
-    <label>流量倍数</label><input name="traffic_multiplier" type="number" min="0" max="100" step="0.1" value="1" title="计入的流量 = 实际流量 × 倍数，0 = 不计流量">
+    <label>流量倍数</label><input name="traffic_multiplier" type="number" min="0" max="100" step="0.1" value="1" title="计入的流量 = 实际流量 × 用户倍数 × 节点倍数，0 = 不计流量">
     <label>每月重置日</label><input name="reset_day" type="number" min="0" max="28" placeholder="0 = 不自动重置">
     <label>SS 端口</label><input name="ss_port" type="number" min="1" max="65535" placeholder="留空自动分配" title="该用户在所有 Shadowsocks 节点上的端口">
     <label>启用</label><select name="enabled"><option value="1">是</option><option value="0">否</option></select>
@@ -148,6 +148,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
     <label>连接地址</label><input name="address" required placeholder="域名或 IP">
     <label data-t="hysteria2 anytls">端口</label><input data-t="hysteria2 anytls" name="port" value="443" placeholder="监听端口，如 443">
     <label data-t="shadowsocks">加密方式</label><select data-t="shadowsocks" name="ss_method"><option>aes-256-gcm</option><option>aes-128-gcm</option><option>chacha20-ietf-poly1305</option></select>
+    <label>流量倍数</label><input name="traffic_multiplier" type="number" min="0" max="100" step="0.1" value="1" title="该节点的流量倍率：计入的流量 = 实际流量 × 用户倍数 × 节点倍数，0 = 该节点不计流量">
     <label data-t="hysteria2">端口跳跃</label><input data-t="hysteria2" name="hop_ports" placeholder="如 20000-30000，留空关闭" title="节点会用 iptables 把这段 UDP 端口转发到监听端口；云服务器安全组需放行这段端口">
     <label data-t="hysteria2">跳跃间隔 (秒)</label><input data-t="hysteria2" name="hop_interval" type="number" min="5" max="3600" value="30">
     <label data-t="hysteria2 anytls">SNI</label><input data-t="hysteria2 anytls" name="sni" placeholder="可选">
@@ -342,7 +343,7 @@ async function loadNodes() {
   nodes = (await api("GET", "/nodes")).items;
   $("#nBody").innerHTML = nodes.map((n, i) => `<tr>
     <td><b>${esc(n.name)}</b></td>
-    <td><span class="tag t-${n.type}">${TYPES[n.type]}</span></td>
+    <td><span class="tag t-${n.type}">${TYPES[n.type]}</span>${n.traffic_multiplier !== 1 ? ` <b title="计入的流量 = 实际流量 × 用户倍数 × ${n.traffic_multiplier}">×${n.traffic_multiplier}</b>` : ""}</td>
     <td class="num">${nodeAddr(n)}</td>
     <td class="num">${n.online}</td>
     <td>${rel(n.last_sync_at)}${n.last_error ? `<div class="muted" style="color:var(--err)">${esc(n.last_error)}</div>` : ""}</td>
@@ -401,7 +402,7 @@ function openNode(n) {
   editingNode = n ? n.id : null;
   const f = $("#nodeForm"); f.reset(); $("#nodeDlg").returnValue = "";
   $("#nodeDlgTitle").textContent = n ? "编辑节点" : "新建节点";
-  if (n) for (const k of ["type", "name", "address", "port", "ss_method", "sni", "obfs_password", "hop_ports", "hop_interval", "api_url", "api_secret", "sort"]) f[k].value = n[k];
+  if (n) for (const k of ["type", "name", "address", "port", "ss_method", "traffic_multiplier", "sni", "obfs_password", "hop_ports", "hop_interval", "api_url", "api_secret", "sort"]) f[k].value = n[k];
   nodeTypeFields();
   if (n) { f.insecure.value = n.insecure ? "1" : "0"; f.enabled.value = n.enabled ? "1" : "0"; }
   $("#nodeDlg").showModal();
@@ -417,6 +418,7 @@ $("#nodeDlg").onclose = async () => {
   const f = $("#nodeForm"); const body = {};
   for (const k of ["name", "address", "port", "sni", "obfs_password", "hop_ports", "api_url", "api_secret"]) body[k] = f[k].value.trim();
   body.type = f.type.value; body.ss_method = f.ss_method.value;
+  body.traffic_multiplier = f.traffic_multiplier.value === "" ? 1 : Number(f.traffic_multiplier.value);
   body.hop_interval = Number(f.hop_interval.value || 30);
   body.sort = Number(f.sort.value || 0); body.insecure = f.insecure.value === "1"; body.enabled = f.enabled.value === "1";
   try {

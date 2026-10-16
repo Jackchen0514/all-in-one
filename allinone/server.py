@@ -58,6 +58,13 @@ def _num(v, name):
         raise APIError(400, "%s must be a number" % name)
 
 
+def _multiplier(v):
+    v = _num(v, "traffic_multiplier")
+    if not 0 <= v <= 100:
+        raise APIError(400, "traffic_multiplier must be between 0 and 100")
+    return round(v, 4)
+
+
 def parse_user_input(body, creating):
     """Normalise user fields. Accepts convenience aliases:
     traffic_limit_gb, expire_days (from now), expire_at (unix seconds)."""
@@ -86,10 +93,7 @@ def parse_user_input(body, creating):
     if "reset_day" in body:
         out["reset_day"] = _int(body["reset_day"], "reset_day", 0, 28)
     if "traffic_multiplier" in body:
-        v = _num(body["traffic_multiplier"], "traffic_multiplier")
-        if not 0 <= v <= 100:
-            raise APIError(400, "traffic_multiplier must be between 0 and 100")
-        out["traffic_multiplier"] = round(v, 4)
+        out["traffic_multiplier"] = _multiplier(body["traffic_multiplier"])
     if "upload" in body:
         out["upload"] = _int(body["upload"], "upload", 0)
     if "download" in body:
@@ -141,6 +145,8 @@ def parse_node_input(body, creating, node_type="hysteria2"):
         _check_ranges(out["hop_ports"], "hop_ports")
     if "hop_interval" in body:
         out["hop_interval"] = _int(body["hop_interval"], "hop_interval", 5, 3600)
+    if "traffic_multiplier" in body:
+        out["traffic_multiplier"] = _multiplier(body["traffic_multiplier"])
     for k in ("insecure", "enabled"):
         if k in body:
             out[k] = int(bool(body[k]))

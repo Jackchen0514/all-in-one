@@ -75,7 +75,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/all-in-one/main
   - anytls：创建 / 更新 / 删除用户；不合规（过期、超额、禁用）的用户在 anytls 上被禁用并设为已过期，已建立的会话也会断开；anytls 自身的限额 / 倍数 / 重置被置为中性值，统一由面板计算
   - ss：合规用户的端口 `add`，不合规用户的端口 `remove`（连接随之断开）；ssmanager 重启后丢失的端口会自动补回
   - 生效延迟最多一个 agent 周期（约 30 秒）
-- **流量**：hysteria2 区分上传 / 下载；anytls 和 ss 只提供合计流量，记为下载。所有协议都乘以用户的流量倍数后计入。节点第一次上报只记录基线，接管旧服务器时不会把历史流量重复计费
+- **流量**：同一用户三种协议共用一个流量池和限额。hysteria2 区分上传 / 下载；anytls 和 ss 只提供合计流量，记为下载。计入的流量 = 实际流量 × **用户流量倍数** × **节点流量倍数**（节点倍数默认 1，可在节点设置里为高级 / 低价节点单独调整，0 表示该节点不计流量）。节点第一次上报只记录基线，接管旧服务器时不会把历史流量重复计费
 - 节点列表的「配置下发」：hysteria2 节点显示端口 / 混淆 / 端口跳跃是否已应用；anytls / ss 节点显示 agent 是否在线、版本和最近上报时间，agent 上报的错误显示在「流量同步」一列
 
 ## 从旧项目迁移
@@ -158,7 +158,7 @@ Docker：`docker build -t allinone . && docker run -d -p 8080:8080 -v /opt/allin
 
 **用户新增字段**：`ss_port`（1-65535，创建时不传则自动分配，冲突返回 409）。
 
-**节点字段**：`type`（`hysteria2` / `anytls` / `shadowsocks`，默认 `hysteria2`）、`name`、`address`、`port`（hysteria2：监听端口；anytls：单个 TCP 端口；shadowsocks：忽略）、`ss_method`（`aes-256-gcm` / `aes-128-gcm` / `chacha20-ietf-poly1305`）、`sni`、`insecure`、`enabled`、`sort`；仅 hysteria2：`hop_ports`、`hop_interval`、`obfs_password`、`api_url`、`api_secret`。
+**节点字段**：`type`（`hysteria2` / `anytls` / `shadowsocks`，默认 `hysteria2`）、`name`、`address`、`port`（hysteria2：监听端口；anytls：单个 TCP 端口；shadowsocks：忽略）、`ss_method`（`aes-256-gcm` / `aes-128-gcm` / `chacha20-ietf-poly1305`）、`traffic_multiplier`（节点流量倍数 0-100，默认 1）、`sni`、`insecure`、`enabled`、`sort`；仅 hysteria2：`hop_ports`、`hop_interval`、`obfs_password`、`api_url`、`api_secret`。
 
 **agent 接口**（以节点 token 鉴权，供 `allinone-agent` 使用）：`GET /agent/{token}/state`、`POST /agent/{token}/report` `{"counters": {"用户名": 累计字节}, "online": n, "error": "", "version": ""}`。
 
