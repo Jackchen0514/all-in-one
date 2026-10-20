@@ -127,6 +127,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
     <label>用户名</label><input name="username" required pattern="[A-Za-z0-9_.@\-]{1,64}">
     <label>连接密码</label><input name="password" placeholder="留空自动生成" autocomplete="off">
     <label>流量限额 (GB)</label><input name="traffic_limit_gb" type="number" min="0" step="any" placeholder="0 = 不限">
+    <label>已用流量 (GB)</label><input name="used_gb" type="number" min="0" step="any" placeholder="0" title="修改后上传计 0、全部计入下载；不修改则保留节点实时统计">
     <label>到期时间</label><input name="expire_at" type="datetime-local">
     <label>快速设置</label><div class="acts">
       <button type="button" class="sm" data-days="0">永不过期</button><button type="button" class="sm" data-days="7">7 天后</button>
@@ -255,6 +256,7 @@ async function loadUsers() {
         <button class="sm" data-a="edit" data-i="${i}">编辑</button>
         <button class="sm" data-a="extend" data-i="${i}">续期</button>
         <button class="sm" data-a="traffic" data-i="${i}">加流量</button>
+        <button class="sm" data-a="used" data-i="${i}">设已用</button>
         <button class="sm" data-a="reset" data-i="${i}">重置流量</button>
         <button class="sm" data-a="toggle" data-i="${i}">${u.enabled ? "禁用" : "启用"}</button>
         <button class="sm" data-a="sub" data-i="${i}">订阅</button>
@@ -274,6 +276,9 @@ $("#uBody").onclick = async e => {
     case "edit": return openUser(u);
     case "extend": { const d = prompt(`为 ${u.username} 续期天数（负数为减少）：`, "30"); if (d === null) return; await api("POST", `/users/${n}/extend`, {days: Number(d)}); toast("已续期"); break; }
     case "traffic": { const g = prompt(`为 ${u.username} 增加流量 (GB，负数为减少)：`, "100"); if (g === null) return; await api("POST", `/users/${n}/add-traffic`, {gb: Number(g)}); toast("已调整流量"); break; }
+    case "used": { const g = prompt(`设置 ${u.username} 的已用流量 (GB)：\n以 + 或 - 开头为增减，例如 -5`, +(u.used / GB).toFixed(3)); if (g === null || g.trim() === "") return;
+      const v = g.trim(), num = Number(v); if (!isFinite(num)) return toast("请输入数字");
+      await api("POST", `/users/${n}/set-traffic`, /^[+-]/.test(v) ? {add_gb: num} : {gb: num}); toast("已设置已用流量"); break; }
     case "reset": if (!confirm(`确认将 ${u.username} 的已用流量清零？`)) return; await api("POST", `/users/${n}/reset-traffic`); toast("已重置"); break;
     case "toggle": await api("PATCH", `/users/${n}`, {enabled: !u.enabled}); break;
     case "del": if (!confirm(`确认删除用户 ${u.username}？`)) return; await api("DELETE", `/users/${n}`); toast("已删除"); break;
@@ -314,6 +319,7 @@ function openUser(u) {
   if (u) {
     f.username.value = u.username; f.password.value = u.password;
     f.traffic_limit_gb.value = u.traffic_limit ? +(u.traffic_limit / GB).toFixed(3) : "";
+    f.used_gb.value = f.used_gb.dataset.orig = +(u.used / GB).toFixed(3);
     f.expire_at.value = toLocalInput(u.expire_at); f.reset_day.value = u.reset_day || "";
     f.traffic_multiplier.value = u.traffic_multiplier; f.ss_port.value = u.ss_port || "";
     f.enabled.value = u.enabled ? "1" : "0"; f.note.value = u.note;
@@ -330,6 +336,8 @@ $("#userDlg").onclose = async () => {
     traffic_multiplier: f.traffic_multiplier.value === "" ? 1 : Number(f.traffic_multiplier.value)};
   if (f.password.value) body.password = f.password.value;
   if (f.ss_port.value) body.ss_port = Number(f.ss_port.value);
+  // only send when edited, so traffic counted while the dialog was open is not overwritten
+  if (f.used_gb.value !== (editing ? f.used_gb.dataset.orig : "")) body.used_gb = Number(f.used_gb.value || 0);
   try {
     if (editing) await api("PATCH", "/users/" + encodeURIComponent(editing), body);
     else await api("POST", "/users", body);
@@ -437,6 +445,9 @@ curl -X POST ${location.origin}/api/v1/users -H "Authorization: Bearer $TOKEN" \
 
 # 续期 30 天
 curl -X POST ${location.origin}/api/v1/users/alice/extend -H "Authorization: Bearer $TOKEN" -d '{"days":30}'
+
+# 设置已用流量为 12.5GB（{"bytes":n} 按字节；{"upload":n,"download":n} 分别设置；{"add_gb":-2} 增减）
+curl -X POST ${location.origin}/api/v1/users/alice/set-traffic -H "Authorization: Bearer $TOKEN" -d '{"gb":12.5}'
 
 # 重置流量
 curl -X POST ${location.origin}/api/v1/users/alice/reset-traffic -H "Authorization: Bearer $TOKEN"`;

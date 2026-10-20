@@ -149,6 +149,7 @@ Docker：`docker build -t allinone . && docker run -d -p 8080:8080 -v /opt/allin
 | GET / POST | `/api/v1/users` | 用户列表 / 创建 |
 | GET / PATCH / DELETE | `/api/v1/users/{username}` | 用户详情（含全部协议的 `links`）/ 修改 / 删除 |
 | POST | `/api/v1/users/{username}/extend` · `add-traffic` · `reset-traffic` · `regenerate` · `kick` | 同 hysteria-manager |
+| POST | `/api/v1/users/{username}/set-traffic` | 设置已用流量，body 四选一：`{"gb": 12.5}` / `{"bytes": n}`（总量，计入下载、上传清零）、`{"upload": n, "download": n}`（按方向，字节）、`{"add_gb": -2}` / `{"add_bytes": n}`（在当前值上增减，最低 0）。超出限额会立即断开，低于限额自动恢复 |
 | GET | `/api/v1/users/{username}/traffic?days=30` | 按天流量历史（所有节点合计） |
 | GET / POST | `/api/v1/nodes` | 节点列表 / 创建 |
 | GET / PATCH / DELETE | `/api/v1/nodes/{id}` | 节点详情 / 修改 / 删除 |
@@ -156,7 +157,7 @@ Docker：`docker build -t allinone . && docker run -d -p 8080:8080 -v /opt/allin
 | GET | `/api/v1/nodes/{id}/config` | hysteria2：服务端 `config.yaml`；anytls / ss：`agent.json` 片段 |
 | POST | `/api/v1/import` | `{"source": "anytls" \| "ssmanager", "items": [...]}`，items 为 anytls-go 的 `GET /api/users` 结果或 ssmanager 面板 `ports` 表的行 → `{"created": [...], "skipped": [{"item","reason"}]}` |
 
-**用户新增字段**：`ss_port`（1-65535，创建时不传则自动分配，冲突返回 409）。
+**用户新增字段**：`ss_port`（1-65535，创建时不传则自动分配，冲突返回 409）。创建 / 修改用户时也可用 `used_gb` 或 `used`（字节）直接设置已用流量。
 
 **节点字段**：`type`（`hysteria2` / `anytls` / `shadowsocks`，默认 `hysteria2`）、`name`、`address`、`port`（hysteria2：监听端口；anytls：单个 TCP 端口；shadowsocks：忽略）、`ss_method`（`aes-256-gcm` / `aes-128-gcm` / `chacha20-ietf-poly1305`）、`traffic_multiplier`（节点流量倍数 0-100，默认 1）、`sni`、`insecure`、`enabled`、`sort`；仅 hysteria2：`hop_ports`、`hop_interval`、`obfs_password`、`api_url`、`api_secret`。
 

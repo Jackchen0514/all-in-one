@@ -116,6 +116,18 @@ class Service:
     def reset_traffic(self, username):
         return self.db.update_user(username, {"upload": 0, "download": 0, "last_reset_at": now()})
 
+    def adjust_used(self, username, delta_bytes):
+        """Add delta_bytes (may be negative) to the used traffic, never below 0. A negative
+        delta takes from download first, then upload."""
+        with self.db.tx():
+            u = self.db.get_user(username)
+            if not u:
+                return None
+            up, down = u["upload"], u["download"] + int(delta_bytes)
+            if down < 0:
+                up, down = max(0, up + down), 0
+            return self.db.update_user(username, {"upload": up, "download": down})
+
     def add_traffic_limit(self, username, delta_bytes):
         u = self.db.get_user(username)
         if not u:

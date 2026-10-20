@@ -378,6 +378,38 @@ class MultiTest(test_api.APITest):
         _, r, _ = self.call("POST", "/api/v1/import", {"source": "ssmanager", "items": rows[:2]})
         self.assertEqual([x["reason"] for x in r["skipped"]], ["exists", "exists"])
 
+    def test_set_used_traffic(self):
+        self.add_node()
+        G = 1024 ** 3
+        _, u, _ = self.call("POST", "/api/v1/users", {"username": "su", "traffic_limit_gb": 10, "used_gb": 2})
+        self.assertEqual((u["upload"], u["download"], u["used"]), (0, 2 * G, 2 * G))
+        self.call("PATCH", "/api/v1/users/su", {"upload": 100, "download": 200})
+        _, u, _ = self.call("POST", "/api/v1/users/su/set-traffic", {"gb": 1.5})
+        self.assertEqual((u["upload"], u["download"]), (0, int(1.5 * G)))
+        _, u, _ = self.call("POST", "/api/v1/users/su/set-traffic", {"upload": 10, "download": 20})
+        self.assertEqual((u["upload"], u["download"]), (10, 20))
+        _, u, _ = self.call("POST", "/api/v1/users/su/set-traffic", {"download": 30})
+        self.assertEqual((u["upload"], u["download"]), (10, 30))
+        _, u, _ = self.call("POST", "/api/v1/users/su/set-traffic", {"add_bytes": -35})
+        self.assertEqual((u["upload"], u["download"]), (5, 0))
+        _, u, _ = self.call("POST", "/api/v1/users/su/set-traffic", {"add_bytes": -100})
+        self.assertEqual(u["used"], 0)
+        # over the limit -> overlimit and kicked; back under -> active again
+        _, u, _ = self.call("POST", "/api/v1/users/su/set-traffic", {"add_gb": 11})
+        self.assertEqual(u["status"], "overlimit")
+        self.assertIn("su", self.fake.kicked)
+        _, u, _ = self.call("PATCH", "/api/v1/users/su", {"used_gb": 3})
+        self.assertEqual((u["upload"], u["download"], u["status"]), (0, 3 * G, "active"))
+        _, u, _ = self.call("PATCH", "/api/v1/users/su", {"used": 7})
+        self.assertEqual(u["used"], 7)
+        for bad in ({}, {"gb": 1, "bytes": 2}, {"gb": 1, "add_gb": 1}, {"gb": -1}, {"bytes": -1},
+                    {"gb": "x"}, {"gb": "nan"}, {"gb": "inf"}, {"upload": -1}, {"add_gb": "inf"}):
+            self.assertEqual(self.call("POST", "/api/v1/users/su/set-traffic", bad)[0], 400, bad)
+        self.assertEqual(self.call("PATCH", "/api/v1/users/su", {"used": 1, "upload": 1})[0], 400)
+        self.assertEqual(self.call("POST", "/api/v1/users/nobody/set-traffic", {"gb": 1})[0], 404)
+        _, u, _ = self.call("GET", "/api/v1/users/su")
+        self.assertEqual(u["used"], 7)
+
     def test_node_traffic_multiplier(self):
         hy = self.add_node(traffic_multiplier=2)
         at = self.node(name="AT", type="anytls", address="a", port="8443", traffic_multiplier=0.5)

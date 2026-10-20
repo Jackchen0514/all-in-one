@@ -2,6 +2,7 @@
 import base64
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -65,6 +66,17 @@ def _multiplier(v):
     return round(v, 4)
 
 
+def _used_bytes(body, key, gb_key, lo=0):
+    if key in body:
+        return _int(body[key], key, lo)
+    v = _num(body[gb_key], gb_key)
+    if not math.isfinite(v) or abs(v) > 1e9:
+        raise APIError(400, "%s out of range" % gb_key)
+    if lo is not None and v < lo:
+        raise APIError(400, "%s must be >= %s" % (gb_key, lo))
+    return int(round(v * GB))
+
+
 def parse_user_input(body, creating):
     """Normalise user fields. Accepts convenience aliases:
     traffic_limit_gb, expire_days (from now), expire_at (unix seconds)."""
@@ -98,6 +110,11 @@ def parse_user_input(body, creating):
         out["upload"] = _int(body["upload"], "upload", 0)
     if "download" in body:
         out["download"] = _int(body["download"], "download", 0)
+    # used / used_gb set the total used traffic (booked as download, upload cleared)
+    if "used" in body or "used_gb" in body:
+        if "upload" in body or "download" in body:
+            raise APIError(400, "use either used/used_gb or upload/download")
+        out["upload"], out["download"] = 0, _used_bytes(body, "used", "used_gb")
     if "note" in body:
         out["note"] = str(body["note"])[:500]
     if "ss_port" in body:
@@ -282,6 +299,30 @@ def api_user_add_traffic(h, svc, m, body):
     u = _get_user(svc, m["name"])
     delta = _int(body["bytes"], "bytes") if "bytes" in body else int(_num(body.get("gb", 0), "gb") * GB)
     u = svc.add_traffic_limit(u["username"], delta)
+    if svc.user_status(u) != "active":
+        svc.kick_everywhere([u["username"]])
+    return svc.present_user(u)
+
+
+@route("POST", "/api/v1/users/{name}/set-traffic")
+def api_user_set_traffic(h, svc, m, body):
+    """Set the used traffic. Body, one of:
+    {"gb": 12.5} / {"bytes": n}             total used (booked as download, upload cleared)
+    {"upload": n, "download": n}            exact bytes per direction
+    {"add_gb": -2} / {"add_bytes": n}       adjust relative to the current value (min 0)"""
+    u = _get_user(svc, m["name"])
+    forms = [k for k in (("gb", "bytes"), ("upload", "download"), ("add_gb", "add_bytes"))
+             if any(x in body for x in k)]
+    if len(forms) != 1 or {"gb", "bytes"} <= set(body) or {"add_gb", "add_bytes"} <= set(body):
+        raise APIError(400, "body needs exactly one of gb/bytes, upload/download, add_gb/add_bytes")
+    if forms[0] == ("add_gb", "add_bytes"):
+        u = svc.adjust_used(u["username"], _used_bytes(body, "add_bytes", "add_gb", lo=None))
+    else:
+        if forms[0] == ("gb", "bytes"):
+            data = {"upload": 0, "download": _used_bytes(body, "bytes", "gb")}
+        else:
+            data = {k: _int(body.get(k, u[k]), k, 0) for k in ("upload", "download")}
+        u = svc.db.update_user(u["username"], data)
     if svc.user_status(u) != "active":
         svc.kick_everywhere([u["username"]])
     return svc.present_user(u)
