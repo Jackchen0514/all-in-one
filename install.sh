@@ -21,7 +21,9 @@
 #
 # Cloudflare API token permissions: Zone -> Zone -> Read, Zone -> DNS -> Edit
 # (My Profile -> API Tokens -> Create Token -> "Edit zone DNS" template, then add Zone:Read).
-set -euo pipefail
+set -Eeuo pipefail
+# say where it stopped instead of exiting silently (main shell only, not $(...) helpers)
+trap 'rc=$?; [ "$BASH_SUBSHELL" = 0 ] && echo "ERROR: install.sh stopped at line $LINENO (exit $rc): $BASH_COMMAND" >&2' ERR
 
 SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]:-$0}")"   # /dev/fd when run via bash <(curl ...)
 SCRIPT_DIR="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd)" || SCRIPT_DIR="$PWD"
@@ -1010,8 +1012,9 @@ latest_anytls_version() {
 }
 
 # unit_flag UNIT FLAG -> value of `FLAG value` in the ExecStart of a systemd unit
-unit_flag() {
-  sed -n 's/^ExecStart=//p' "$1" 2>/dev/null | tr ' ' '\n' | awk -v f="$2" 'p{print; exit} $0==f{p=1}'
+unit_flag() {  # unit_flag UNIT_FILE FLAG -> value of FLAG on its ExecStart line (empty if none / no file)
+  [ -f "$1" ] || return 0
+  sed -n 's/^ExecStart=//p' "$1" | tr ' ' '\n' | awk -v f="$2" '!done && p{print; done=1} $0==f{p=1}'
 }
 
 install_anytls_node() {
