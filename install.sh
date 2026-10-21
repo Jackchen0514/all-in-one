@@ -335,15 +335,35 @@ warn_busy_range() {
 
 # ---- certificates (acme.sh + Cloudflare DNS-01) ----------------------------
 ensure_acme() {
-  if ! command -v crontab >/dev/null; then   # acme.sh needs cron for auto-renewal
-    if command -v apt-get >/dev/null; then install_pkgs cron; else install_pkgs cronie; fi
-    systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || true
-  fi
+  ensure_cron
   if [ ! -x "$ACME_HOME/acme.sh" ]; then
     info "installing acme.sh"
     curl -fsSL https://get.acme.sh | sh -s email="$EMAIL" >/dev/null
   fi
+  ensure_acme_cron
+}
+
+ensure_cron() {  # acme.sh needs cron for auto-renewal
+  if ! command -v crontab >/dev/null; then
+    if command -v apt-get >/dev/null; then install_pkgs cron; else install_pkgs cronie; fi
+  fi
+  systemctl enable --now cron >/dev/null 2>&1 || systemctl enable --now crond >/dev/null 2>&1 || true
+}
+
+# ensure_acme_cron: make sure root's crontab has the acme.sh renewal job. acme.sh only adds it
+# when it is installed, and silently skips that when crontab is missing at that moment.
+has_acme_cron() { crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -F -- "--cron" | grep -qF "$ACME_HOME"; }
+ensure_acme_cron() {
   clean_acme_cron
+  has_acme_cron && return 0
+  info "adding the acme.sh renewal cron job"
+  "$ACME_HOME/acme.sh" --install-cronjob --home "$ACME_HOME" >/dev/null 2>&1 || true
+  if ! has_acme_cron; then
+    { crontab -l 2>/dev/null || true
+      echo "$((RANDOM % 60)) $((RANDOM % 24)) * * * \"$ACME_HOME\"/acme.sh --cron --home \"$ACME_HOME\" > /dev/null"
+    } | crontab -
+  fi
+  has_acme_cron || warn "could not add the acme.sh cron job; certificates will not renew automatically. Add it with: crontab -e"
 }
 
 # clean_acme_cron: drop "acme.sh --cron" entries whose acme.sh no longer exists (e.g. left by a
@@ -1448,6 +1468,7 @@ update_all() {
   [ $panel = 1 ] || [ $hy = 1 ] || [ $agent = 1 ] || die "nothing to update: neither the panel nor a node was installed by install.sh"
   install_pkgs curl python3 tar
   if [ $panel = 1 ] || [ $agent = 1 ]; then fetch_source; fi
+  if [ -x "$ACME_HOME/acme.sh" ]; then ensure_cron; ensure_acme_cron; fi
   if [ $panel = 1 ]; then update_panel; fi
   if [ $hy = 1 ]; then update_hysteria_node; fi
   if [ $at = 1 ] && [ "$UPDATE_AT" = 1 ]; then
