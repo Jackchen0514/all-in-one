@@ -343,6 +343,25 @@ ensure_acme() {
     info "installing acme.sh"
     curl -fsSL https://get.acme.sh | sh -s email="$EMAIL" >/dev/null
   fi
+  clean_acme_cron
+}
+
+# clean_acme_cron: drop "acme.sh --cron" entries whose acme.sh no longer exists (e.g. left by a
+# removed standalone anytls-go, which kept its own copy in /etc/anytls/acme.sh)
+clean_acme_cron() {
+  local cur new
+  cur="$(crontab -l 2>/dev/null)" || return 0
+  new="$(echo "$cur" | python3 -c '
+import re, os, sys
+for line in sys.stdin.read().splitlines():
+    m = re.search(r"(\S+)\s+--cron\b", line)
+    if m and not line.lstrip().startswith("#"):
+        exe = m.group(1).replace("\"", "").replace("\x27", "")
+        if exe.endswith("acme.sh") and not os.path.exists(exe):
+            print("removing stale cron entry: " + line, file=sys.stderr)
+            continue
+    print(line)')"
+  [ "$new" = "$cur" ] || echo "$new" | crontab -
 }
 
 acme_issue() {  # acme_issue DOMAIN ZONE_ID
