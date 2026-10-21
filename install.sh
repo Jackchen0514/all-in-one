@@ -451,8 +451,10 @@ install_panel() {
   valid_domain "$DOMAIN" || die "invalid domain: $DOMAIN"
   check_port tcp PANEL_PORT allinone.service --panel-port   # before touching DNS / certificates
   if [ -n "$SS_RANGE" ]; then
-    [[ "$SS_RANGE" =~ ^([0-9]+)-([0-9]+)$ ]] && valid_port "${BASH_REMATCH[1]}" && valid_port "${BASH_REMATCH[2]}" \
-      && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] || die "--ss-port-range must look like 40000-49999"
+    # (valid_port runs its own =~, which resets BASH_REMATCH, so split the range first)
+    local lo="${SS_RANGE%%-*}" hi="${SS_RANGE#*-}"
+    [[ "$SS_RANGE" == *-* ]] && valid_port "$lo" && valid_port "$hi" && [ "$lo" -le "$hi" ] \
+      || die "--ss-port-range must look like 40000-49999"
   fi
   ask EMAIL "ACME email"
   install_pkgs curl python3 openssl tar
