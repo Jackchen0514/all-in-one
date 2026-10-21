@@ -29,6 +29,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/all-in-one/main
      --panel https://panel.example.com --api-token <面板 API Token> --name 日本 \
      [--type hysteria2,anytls,ss] [--obfs] [--hop 20000-30000] [--anytls-port 443] [--ss-method aes-256-gcm]
 
+# 指定端口（任意组合，未指定的用默认值）
+bash install.sh all --domain panel.example.com --node-domain hk.example.com --cf-token <CF_TOKEN> --email you@mail.com \
+     --panel-port 8443 --port 8444 --anytls-port 9443 --stats-port 19999 \
+     --anytls-api-port 18843 --ss-manager-port 16100 --ss-port-range 50000-59999
+
 # 只装面板
 bash install.sh panel --domain panel.example.com --cf-token <CF_TOKEN> --email you@mail.com
 
@@ -41,9 +46,11 @@ Cloudflare API Token 权限：**Zone · Zone · Read** + **Zone · DNS · Edit**
 | 组件 | 端口 | 证书 |
 |---|---|---|
 | 面板 | TCP 443（`--panel-port`） | acme.sh，`/etc/allinone/certs/<域名>/`，自动续期 |
-| Hysteria2 | UDP 443（`--port`）、统计 API TCP 9999（只对面板开放） | hysteria 内置 ACME |
-| AnyTLS | TCP 443；与面板同机且面板占用 443 时默认 8443（`--anytls-port`） | 与面板共用 `/etc/allinone/certs/<域名>/` |
-| Shadowsocks | 每个用户一个端口，TCP+UDP，默认 40000-49999（面板 `AIO_SS_PORT_RANGE`） | 不需要 |
+| Hysteria2 | UDP 443（`--port`）、统计 API TCP 9999（`--stats-port`，只对面板开放） | 与面板共用 `/etc/allinone/certs/<域名>/` |
+| AnyTLS | TCP 443；与面板同机且面板占用 443 时默认 8443（`--anytls-port`）；管理 API 127.0.0.1:8843（`--anytls-api-port`） | 与面板共用 `/etc/allinone/certs/<域名>/` |
+| Shadowsocks | 每个用户一个端口，TCP+UDP，默认 40000-49999（`--ss-port-range`，即面板 `AIO_SS_PORT_RANGE`）；ssmanager 控制端口 UDP 127.0.0.1:6100（`--ss-manager-port`） | 不需要 |
+
+安装前会逐个检查端口：被其他程序占用时会提示占用的进程 / systemd 服务，并**让你输入另一个端口**（非交互执行时直接退出并提示用哪个参数改）。重复执行时未指定的端口保持原值。SS 用户端口范围内如果有其他程序在监听，安装结束前会给出警告。
 
 本机 ufw / firewalld 会自动放行（SS 端口由 agent 在下发时放行），**云服务器安全组需要自己放行**，安装结束会打印需要放行的列表。
 

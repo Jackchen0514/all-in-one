@@ -59,7 +59,7 @@ if [ "$MODE" = uninstall ]; then UNINSTALL_WHAT="${1:-}"; [ $# -gt 0 ] && shift;
 DOMAIN=""; NODE_DOMAIN=""; CF_TOKEN="${CF_TOKEN:-}"; EMAIL=""
 PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
 PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0; HOP=""; HOP_SET=0
-TYPES="hysteria2,anytls,ss"; AT_PORT=""; SS_METHOD=""
+TYPES="hysteria2,anytls,ss"; AT_PORT=""; AT_API_PORT=""; SS_METHOD=""; SS_MGR_PORT=""; SS_RANGE=""
 HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
 
 usage() { cat <<'EOF'
@@ -81,6 +81,8 @@ Options:
   --panel-port P      panel HTTPS port (default 443)
   --admin-user U      panel admin user (default admin)
   --admin-pass P      panel admin password (default: random, kept on re-install)
+  --ss-port-range R   panel: port range for the per-user Shadowsocks ports (default 40000-49999,
+                      kept on re-install; existing users keep their port)
   --panel URL         node: panel URL, e.g. https://panel.example.com
   --api-token T       node: panel API token (AIO_API_TOKEN of the panel)
   --name N            node: display name (default: node domain; the protocol is appended
@@ -92,18 +94,24 @@ Options:
   --port P            UDP port (default 443; on re-install the panel's value is kept)
   --obfs / --no-obfs  enable / disable salamander obfuscation (default: keep the panel's setting)
   --hop RANGE         port hopping, e.g. 20000-30000 ("" disables; default: keep the panel's setting)
-  --stats-port P      traffic stats API port (default 9999)
+  --stats-port P      traffic stats API port, TCP (default 9999)
   --hy-version V      hysteria version, e.g. v2.6.1 (default latest)
 
   anytls:
   --anytls-port P     TCP port (default 443, 8443 when the panel uses TCP 443 on this machine;
                       an adopted anytls-go server keeps its port)
+  --anytls-api-port P local management API port, TCP on 127.0.0.1 (default 8843)
   --anytls-version V  anytls-go release, e.g. v0.0.35 (default latest)
 
   shadowsocks:
   --ss-method M       aes-256-gcm | aes-128-gcm | chacha20-ietf-poly1305 (default aes-256-gcm,
                       or the most used method of an adopted ssmanager panel)
-                      Every user has their own port, assigned by the panel (AIO_SS_PORT_RANGE).
+                      Every user has their own port, assigned by the panel (--ss-port-range).
+  --ss-manager-port P ssmanager control port, UDP on 127.0.0.1 (default 6100)
+
+  Every port is checked before use. When one is taken by another program the installer asks
+  for a different one (or stops with the option to use when not run interactively).
+  Ports that are not given keep their current value on a re-install.
 
   --no-dns            don't create/update the Cloudflare A record
   --no-hysteria       update: don't upgrade the hysteria binary
@@ -133,6 +141,9 @@ while [ $# -gt 0 ]; do
     --stats-port) STATS_PORT="$2"; shift 2;;
     --hy-version) HY_VERSION="$2"; shift 2;;
     --anytls-port) AT_PORT="$2"; shift 2;;
+    --anytls-api-port) AT_API_PORT="$2"; shift 2;;
+    --ss-manager-port) SS_MGR_PORT="$2"; shift 2;;
+    --ss-port-range) SS_RANGE="$2"; shift 2;;
     --anytls-version) AT_VERSION="$2"; shift 2;;
     --ss-method) SS_METHOD="$2"; shift 2;;
     --no-dns) DNS_RECORD=0; shift;;
@@ -255,11 +266,12 @@ open_port() {  # open_port PORT tcp|udp [from-ip]
   fi
 }
 
-# tcp_port_user PORT -> "process pid unit" of the listener on TCP PORT (empty if free)
-tcp_port_user() {
+# port_user tcp|udp PORT -> "process pid unit" of the listener on PORT (empty if free)
+port_user() {
   command -v ss >/dev/null || return 0
-  local line name pid unit=""
-  line="$(ss -Hltnp "sport = :$1" 2>/dev/null | head -1)"
+  local flags=-Hltnp line name pid unit=""
+  [ "$1" = udp ] && flags=-Hlunp
+  line="$(ss "$flags" "sport = :$2" 2>/dev/null | head -1)"
   [ -n "$line" ] || return 0
   name="$(echo "$line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')"
   pid="$(echo "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
@@ -267,19 +279,56 @@ tcp_port_user() {
   echo "${name:-?} ${pid:-?} ${unit:--}"
 }
 
-# check_tcp_port PORT OWN_UNIT OPTION: die unless TCP PORT is free or already held by OWN_UNIT
-# (a re-install), naming the process / systemd unit in the way.
-check_tcp_port() {
-  local port="$1" own="$2" opt="$3" name pid unit hint=""
-  read -r name pid unit <<<"$(tcp_port_user "$port")"
-  [ -z "${name:-}" ] || [ "$unit" = "$own" ] && return 0
-  if [ "$unit" = hy2mgr.service ]; then
-    hint=" This is the old hysteria-manager panel; allinone replaces it (its database is adopted on the first panel install)."
-  fi
-  local stop="kill $pid"
-  case "$unit" in *.service) stop="systemctl disable --now $unit";; esac
-  die "TCP $port is already in use by $name (pid $pid, unit $unit).$hint
+valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+
+# check_port tcp|udp VAR OWN_UNIT OPTION: make sure the port in $VAR is free, or already held by
+# OWN_UNIT (a re-install), and not picked for something else in this run. When it is taken, ask
+# for another port (interactive) or stop, naming the process / systemd unit in the way.
+CLAIMED_PORTS=" "
+check_port() {
+  local proto="$1" var="$2" own="$3" opt="$4" P name pid unit why hint stop new
+  P="$(echo "$proto" | tr 'a-z' 'A-Z')"
+  while :; do
+    valid_port "${!var}" || die "$opt: invalid port '${!var}'"
+    why=""; hint=""
+    if [[ "$CLAIMED_PORTS" == *" $proto/${!var}:"* ]]; then
+      why="$P ${!var} is already used by this installation for $(echo "$CLAIMED_PORTS" | sed -n "s#.* $proto/${!var}:\([^ ]*\).*#\1#p")."
+    else
+      read -r name pid unit <<<"$(port_user "$proto" "${!var}")"
+      if [ -n "${name:-}" ] && [ "$unit" != "$own" ]; then
+        stop="kill $pid"
+        case "$unit" in *.service) stop="systemctl disable --now $unit";; esac
+        [ "$unit" = hy2mgr.service ] && hint="
+       This is the old hysteria-manager panel; allinone replaces it (its database is adopted on the first panel install)."
+        why="$P ${!var} is already in use by $name (pid $pid, unit $unit).$hint
        Stop it ($stop) and re-run, or choose another port with $opt"
+      fi
+    fi
+    if [ -z "$why" ]; then
+      CLAIMED_PORTS="$CLAIMED_PORTS$proto/${!var}:$opt "
+      return 0
+    fi
+    [ -t 0 ] || die "$why"
+    warn "$why"
+    read -rp "Another $P port for $opt (empty = abort): " new
+    [ -n "$new" ] || die "aborted"
+    printf -v "$var" '%s' "$new"
+  done
+}
+
+# warn_busy_range A-B: list listeners of other programs inside the Shadowsocks user port range
+warn_busy_range() {
+  command -v ss >/dev/null || return 0
+  local busy
+  busy="$(ss -Hltunp 2>/dev/null | awk -v r="$1" '
+    BEGIN { split(r, a, "-") }
+    { n = split($5, p, ":"); port = p[n] + 0
+      if (port >= a[1] + 0 && port <= a[2] + 0 && $0 !~ /"ss(server|manager)"/) {
+        name = $0; sub(/.*users:\(\("/, "", name); sub(/".*/, "", name)
+        print $1 "/" port "(" name ")" } }' | sort -u | tr '\n' ' ')"
+  [ -z "$busy" ] || warn "ports inside the Shadowsocks user range $1 are used by other programs: $busy
+       users given one of these ports cannot connect over SS. Change their port in the panel, or pick
+       another range (install.sh panel --ss-port-range A-B, or AIO_SS_PORT_RANGE in $PANEL_DIR/.env)."
 }
 
 # ---- certificates (acme.sh + Cloudflare DNS-01) ----------------------------
@@ -400,7 +449,11 @@ wait_panel() {
 install_panel() {
   ask DOMAIN "Panel domain (e.g. panel.example.com)"
   valid_domain "$DOMAIN" || die "invalid domain: $DOMAIN"
-  check_tcp_port "$PANEL_PORT" allinone.service --panel-port   # before touching DNS / certificates
+  check_port tcp PANEL_PORT allinone.service --panel-port   # before touching DNS / certificates
+  if [ -n "$SS_RANGE" ]; then
+    [[ "$SS_RANGE" =~ ^([0-9]+)-([0-9]+)$ ]] && valid_port "${BASH_REMATCH[1]}" && valid_port "${BASH_REMATCH[2]}" \
+      && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] || die "--ss-port-range must look like 40000-49999"
+  fi
   ask EMAIL "ACME email"
   install_pkgs curl python3 openssl tar
   python3 -c 'import sys; sys.exit(sys.version_info < (3, 8))' || die "python >= 3.8 required"
@@ -444,7 +497,7 @@ AIO_ADMIN_PASS=$ADMIN_PASS
 AIO_API_TOKEN=$API_TOKEN
 AIO_PUBLIC_URL=$url
 AIO_SYNC_INTERVAL=60
-AIO_SS_PORT_RANGE=${ss_range:-40000-49999}
+AIO_SS_PORT_RANGE=${SS_RANGE:-${ss_range:-40000-49999}}
 AIO_TLS_CERT=$CERT_DIR/$DOMAIN/fullchain.pem
 AIO_TLS_KEY=$CERT_DIR/$DOMAIN/key.pem
 EOF
@@ -516,6 +569,7 @@ install_node() {
   PANEL_URL="${PANEL_URL%/}"
   ask API_TOKEN "Panel API token" secret
   NODE_NAME="${NODE_NAME:-$DOMAIN}"
+  [ -z "$SS_RANGE" ] || [ "$MODE" != node ] || warn "--ss-port-range is a panel setting; run it with install.sh panel (ignored here)"
   TYPES="$(echo "$TYPES" | tr 'A-Z' 'a-z' | sed 's/\bhy2\b/hysteria2/; s/\bshadowsocks\b/ss/g')"
   local t
   for t in $(echo "$TYPES" | tr ',' ' '); do
@@ -579,6 +633,10 @@ install_hysteria_node() {
   fi
   if [ "$OBFS" = 1 ] && [ -z "$obfs_pw" ]; then obfs_pw="$(rand 24)"; fi
   local listen_port="${port_spec%%[-,]*}"   # hysteria listens on the first port of a range / list
+  local want_port="$listen_port"
+  check_port udp listen_port hysteria-server.service --port
+  [ "$listen_port" = "$want_port" ] || port_spec="$listen_port"
+  check_port tcp STATS_PORT hysteria-server.service --stats-port
 
   # Same machine as the panel -> stats API stays on localhost.
   local stats_listen stats_url local_panel=0
@@ -970,7 +1028,12 @@ install_anytls_node() {
     elif [ "$MODE" = all ] && [ "$PANEL_PORT" = 443 ]; then AT_PORT=8443
     else AT_PORT=443; fi
   fi
-  check_tcp_port "$AT_PORT" anytls-server.service --anytls-port
+  check_port tcp AT_PORT anytls-server.service --anytls-port
+  if [ -z "$AT_API_PORT" ]; then
+    AT_API_PORT="$(unit_flag "$unit" -api-listen)"; AT_API_PORT="${AT_API_PORT##*:}"
+    AT_API_PORT="${AT_API_PORT:-${AT_API##*:}}"
+  fi
+  check_port tcp AT_API_PORT anytls-server.service --anytls-api-port
 
   # import users of a running standalone anytls-go before the agent takes over
   local existing=""
@@ -1011,6 +1074,7 @@ print(json.dumps({"type": "anytls", "name": os.environ["NAME"], "address": os.en
                   "port": os.environ["PORT"], "sni": os.environ["ADDR"], "insecure": False, "enabled": True}))')"
   node_json="$(register_node "$existing" "$body")" || die "panel rejected the anytls node settings"
 
+  AT_API="127.0.0.1:$AT_API_PORT"
   # -p only bootstraps a user when the database is empty (the agent deletes it on its first run)
   local cmd="$AT_BIN -l 0.0.0.0:$AT_PORT -p $boot_pw -db $AT_DATA_DIR/anytls.db -api-listen $AT_API -api-key $api_key"
   cmd="$cmd -cert $CERT_DIR/$DOMAIN/fullchain.pem -key $CERT_DIR/$DOMAIN/key.pem"
@@ -1148,6 +1212,12 @@ print(json.dumps({"type": "shadowsocks", "name": os.environ["NAME"], "address": 
                   "ss_method": os.environ["METHOD"], "enabled": True}))')"
   node_json="$(register_node "$existing" "$body")" || die "panel rejected the shadowsocks node settings (check --ss-method)"
 
+  if [ -z "$SS_MGR_PORT" ]; then
+    SS_MGR_PORT="$(unit_flag /etc/systemd/system/ssmanager.service --manager-addr)"; SS_MGR_PORT="${SS_MGR_PORT##*:}"
+    SS_MGR_PORT="${SS_MGR_PORT:-${SS_MANAGER##*:}}"
+  fi
+  check_port udp SS_MGR_PORT ssmanager.service --ss-manager-port
+  SS_MANAGER="127.0.0.1:$SS_MGR_PORT"
   # -U: TCP and UDP. Fall back to TCP-only flags if this ssmanager build doesn't accept it.
   write_ssmanager_unit "-U"
   systemctl daemon-reload
@@ -1163,6 +1233,7 @@ print(json.dumps({"type": "shadowsocks", "name": os.environ["NAME"], "address": 
   echo "$SS_TAG" > /etc/allinone/ssrust.version
 
   local range; range="$(panel_api GET /settings | json_get ss_port_range 2>/dev/null || echo 40000-49999)"
+  warn_busy_range "$range"
   AGENT_NODES+=("$(TOKEN="$(echo "$node_json" | json_get auth_token)" MGR="$SS_MANAGER" python3 -c '
 import json, os
 print(json.dumps({"token": os.environ["TOKEN"], "type": "shadowsocks", "manager": os.environ["MGR"]}))')")
