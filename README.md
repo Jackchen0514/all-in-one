@@ -83,6 +83,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/all-in-one/main
   - ss：合规用户的端口 `add`，不合规用户的端口 `remove`（连接随之断开）；ssmanager 重启后丢失的端口会自动补回
   - 生效延迟最多一个 agent 周期（约 30 秒）
 - **流量**：同一用户三种协议共用一个流量池和限额。hysteria2 区分上传 / 下载；anytls 和 ss 只提供合计流量，记为下载。计入的流量 = 实际流量 × **用户流量倍数** × **节点流量倍数**（节点倍数默认 1，可在节点设置里为高级 / 低价节点单独调整，0 表示该节点不计流量）。节点第一次上报只记录基线，接管旧服务器时不会把历史流量重复计费
+- **出口分组**（来自 anytls-go）：在「出口分组」页新建 SOCKS5 链式代理（`host:port` 或 `socks5://user:pass@host:port`），在用户编辑页为用户指定出口，未指定的直连。
+  - 只在 **AnyTLS 节点**上生效：agent 把分组同步到 anytls-server（名为 `aio-<id> <名称>`，手动建的分组不受影响），并把用户指派过去；Hysteria2 无法按用户选择出口，shadowsocks-rust 不支持上游代理，这两种协议始终直连
+  - 每个 AnyTLS 节点的 agent 每 5 分钟（以及地址修改后立即）测试一次各分组到 `1.1.1.1:443` 的连通性，结果和延迟显示在分组列表
+  - 删除分组后，使用它的用户自动改回直连；需要 anytls-server v0.0.33+（v0.0.34+ 才有连通性测试），旧版本在有用户使用分组时会在节点上报错，执行 `update.sh` 升级即可
 - 节点列表的「配置下发」：hysteria2 节点显示端口 / 混淆 / 端口跳跃是否已应用；anytls / ss 节点显示 agent 是否在线、版本和最近上报时间，agent 上报的错误显示在「流量同步」一列
 
 ## 从旧项目迁移
@@ -90,7 +94,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/all-in-one/main
 | 旧项目 | 怎么迁移 |
 |---|---|
 | hysteria-manager 面板 | 在原面板服务器上执行 `install.sh panel`（同一个面板域名）：自动复制 `/opt/hy2mgr/data/hy2mgr.db`、沿用原管理员密码和 API Token，停用旧的 `hy2mgr` 服务。已有的 hysteria 节点回调地址不变，无需改动；之后在节点上执行一次 `update.sh` 换成新的同步程序 |
-| anytls-go 服务器 | 在该服务器上执行 `install.sh node --type anytls ...`：先把 anytls-go 现有用户（用户名、密码、限额、已用流量、倍数、到期、月度重置）导入面板，再接管 `anytls-server`（沿用原端口、数据库、凭据和 fallback 设置） |
+| anytls-go 服务器 | 在该服务器上执行 `install.sh node --type anytls ...`：先把 anytls-go 现有用户（用户名、密码、限额、已用流量、倍数、到期、月度重置、出口分组）和出口分组导入面板，再接管 `anytls-server`（沿用原端口、数据库、凭据和 fallback 设置） |
 | ssmanager 面板 | 在该服务器上执行 `install.sh node --type ss ...`：先把旧面板的所有端口导入为面板用户（**保留原端口和密码**，客户端无需更换；用户名取备注，非英文备注用 `ss<端口>`），沿用全局流量系数，节点加密方式取导入端口里最常用的一种，然后停用 `ssmanager-panel` |
 
 导入时已存在的同名同密码用户会跳过（可以重复执行）；用户名或密码与面板里其他用户冲突的会跳过并在安装输出里列出原因。也可以直接调用 `POST /api/v1/import` 导入。
@@ -156,15 +160,17 @@ Docker：`docker build -t allinone . && docker run -d -p 8080:8080 -v /opt/allin
 | GET / POST | `/api/v1/users` | 用户列表 / 创建 |
 | GET / PATCH / DELETE | `/api/v1/users/{username}` | 用户详情（含全部协议的 `links`）/ 修改 / 删除 |
 | POST | `/api/v1/users/{username}/extend` · `add-traffic` · `reset-traffic` · `regenerate` · `kick` | 同 hysteria-manager |
+| GET / POST | `/api/v1/outbound-groups` | 出口分组列表（含 `users` 用户数、`status` 各 AnyTLS 节点的连通性 `{node_id, node, ok, latency_ms, error, checked_at}`）/ 新建 `{"name", "socks5_url", "note"}` |
+| GET / PATCH / DELETE | `/api/v1/outbound-groups/{id}` | 分组详情 / 修改 / 删除（使用它的用户改回直连，返回 `users_moved_to_direct`） |
 | POST | `/api/v1/users/{username}/set-traffic` | 设置已用流量，body 四选一：`{"gb": 12.5}` / `{"bytes": n}`（总量，计入下载、上传清零）、`{"upload": n, "download": n}`（按方向，字节）、`{"add_gb": -2}` / `{"add_bytes": n}`（在当前值上增减，最低 0）。超出限额会立即断开，低于限额自动恢复 |
 | GET | `/api/v1/users/{username}/traffic?days=30` | 按天流量历史（所有节点合计） |
 | GET / POST | `/api/v1/nodes` | 节点列表 / 创建 |
 | GET / PATCH / DELETE | `/api/v1/nodes/{id}` | 节点详情 / 修改 / 删除 |
 | POST | `/api/v1/nodes/{id}/sync` | 同步单个 hysteria2 节点 |
 | GET | `/api/v1/nodes/{id}/config` | hysteria2：服务端 `config.yaml`；anytls / ss：`agent.json` 片段 |
-| POST | `/api/v1/import` | `{"source": "anytls" \| "ssmanager", "items": [...]}`，items 为 anytls-go 的 `GET /api/users` 结果或 ssmanager 面板 `ports` 表的行 → `{"created": [...], "skipped": [{"item","reason"}]}` |
+| POST | `/api/v1/import` | `{"source": "anytls" \| "ssmanager", "items": [...]}`，items 为 anytls-go 的 `GET /api/users` 结果或 ssmanager 面板 `ports` 表的行；anytls 可附带 `"outbound_groups"`（anytls-go 的 `GET /api/outbound-groups` 结果），同名同地址的分组复用 → `{"created": [...], "skipped": [{"item","reason"}], "groups_created": [...]}` |
 
-**用户新增字段**：`ss_port`（1-65535，创建时不传则自动分配，冲突返回 409）。创建 / 修改用户时也可用 `used_gb` 或 `used`（字节）直接设置已用流量。
+**用户新增字段**：`ss_port`（1-65535，创建时不传则自动分配，冲突返回 409）、`outbound_group_id`（出口分组 id，`0` = 直连，不存在的 id 返回 400）。创建 / 修改用户时也可用 `used_gb` 或 `used`（字节）直接设置已用流量。
 
 **节点字段**：`type`（`hysteria2` / `anytls` / `shadowsocks`，默认 `hysteria2`）、`name`、`address`、`port`（hysteria2：监听端口；anytls：单个 TCP 端口；shadowsocks：忽略）、`ss_method`（`aes-256-gcm` / `aes-128-gcm` / `chacha20-ietf-poly1305`）、`traffic_multiplier`（节点流量倍数 0-100，默认 1）、`sni`、`insecure`、`enabled`、`sort`；仅 hysteria2：`hop_ports`、`hop_interval`、`obfs_password`、`api_url`、`api_secret`。
 

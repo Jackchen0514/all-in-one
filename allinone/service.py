@@ -18,6 +18,24 @@ log = logging.getLogger("allinone")
 GB = 1024 ** 3
 # Shadowsocks ciphers that accept an arbitrary password (the 2022 ciphers need a fixed-size key).
 SS_METHODS = ("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305")
+# Prefix of the outbound groups the agent manages on anytls-server ("aio-<panel id> <name>").
+GROUP_PREFIX = "aio-"
+
+
+def normalize_socks5_url(v):
+    """`host:port` or `socks5://[user[:pass]@]host:port` (what anytls-server accepts) -> the
+    trimmed value; raises ValueError otherwise."""
+    v = str(v or "").strip()
+    u = urllib.parse.urlsplit(v if "://" in v else "socks5://" + v)
+    if u.scheme not in ("socks5", "socks") or u.path not in ("", "/") or u.query or u.fragment:
+        raise ValueError("socks5_url must be host:port or socks5://user:pass@host:port")
+    try:
+        port = u.port
+    except ValueError:
+        port = None
+    if not u.hostname or not port:
+        raise ValueError("socks5_url needs a host and a port (1-65535)")
+    return v
 
 
 class Service:
@@ -218,13 +236,14 @@ class Service:
             return result
 
     # ---- import from standalone anytls-go / ssmanager ---------------------
-    def import_users(self, source, items):
+    def import_users(self, source, items, groups=None):
         """Adopt users of a standalone anytls-go server (items = its GET /api/users) or of the
         ssmanager panel (items = rows of its `ports` table). Existing panel users are never
         modified: an item whose username already exists with the same password is reported as
         `exists`, any other conflict is skipped with a reason."""
         created, skipped = [], []
         methods = {}
+        gmap, groups_created = self.import_groups(groups) if source == "anytls" else ({}, [])
         for it in items:
             try:
                 data = (self._from_anytls if source == "anytls" else self._from_ssmanager)(it)
@@ -232,6 +251,11 @@ class Service:
                 skipped.append({"item": str(it.get("username") or it.get("server_port") or "?")
                                 if isinstance(it, dict) else "?", "reason": "invalid item: %s" % e})
                 continue
+            if source == "anytls":
+                try:
+                    data["outbound_group_id"] = gmap.get(int(it.get("outbound_group_id") or 0), 0)
+                except (TypeError, ValueError):
+                    pass
             if source == "ssmanager":
                 methods[it.get("method") or "aes-256-gcm"] = methods.get(it.get("method") or "aes-256-gcm", 0) + 1
             name = data["username"]
@@ -259,6 +283,8 @@ class Service:
                 self.db.update_user(name, {"download": used})
             created.append(name)
         out = {"created": created, "skipped": skipped}
+        if source == "anytls":
+            out["groups_created"] = groups_created
         if source == "ssmanager":
             out["methods"] = methods
         return out
@@ -323,7 +349,10 @@ class Service:
         out = {"type": node["type"], "node_id": node["id"], "name": node["name"]}
         if node["type"] == "anytls":
             out["users"] = [{"username": u["username"], "password": u["password"],
-                             "active": on and self.user_status(u, t) == "active"} for u in users]
+                             "active": on and self.user_status(u, t) == "active",
+                             "outbound_group_id": u["outbound_group_id"]} for u in users]
+            out["outbound_groups"] = [{"id": g["id"], "name": g["name"], "socks5_url": g["socks5_url"]}
+                                      for g in self.db.list_groups()]
         elif node["type"] == "shadowsocks":
             out["method"] = node["ss_method"]
             out["ports"] = [{"port": u["ss_port"], "password": u["password"], "username": u["username"]}
@@ -371,10 +400,62 @@ class Service:
             online = max(0, int(body.get("online") or 0))
         except (TypeError, ValueError):
             online = 0
+        self._store_outbound_results(node, body.get("outbounds"), t)
         self.db.update_node(node["id"], {"last_sync_at": t, "agent_seen_at": t, "online": online,
                                          "last_error": str(body.get("error") or "")[:500],
                                          "agent_version": str(body.get("version") or "")[:40]})
         return {"ok": True, "users": users, "baseline": first}
+
+    def _store_outbound_results(self, node, results, t):
+        """results: {"<group id>": {"ok": bool, "latency_ms": n, "error": "", "at": unix}}"""
+        if not isinstance(results, dict):
+            return
+        for gid, res in results.items():
+            try:
+                gid = int(gid)
+                ok, latency = bool(res.get("ok")), max(0, int(res.get("latency_ms") or 0))
+                at = int(res.get("at") or t)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if not self.db.get_group(gid):
+                continue
+            self.db.x("INSERT INTO outbound_status(group_id,node_id,ok,latency_ms,error,checked_at) VALUES(?,?,?,?,?,?) "
+                      "ON CONFLICT(group_id,node_id) DO UPDATE SET ok=excluded.ok, latency_ms=excluded.latency_ms, "
+                      "error=excluded.error, checked_at=excluded.checked_at",
+                      (gid, node["id"], int(ok), latency, str(res.get("error") or "")[:300], min(at, t)))
+
+    def present_group(self, g):
+        g = dict(g)
+        g["users"] = self.db.q1("SELECT COUNT(*) n FROM users WHERE outbound_group_id=?", (g["id"],))["n"]
+        g["status"] = self.db.q(
+            "SELECT s.node_id, n.name node, s.ok, s.latency_ms, s.error, s.checked_at FROM outbound_status s "
+            "JOIN nodes n ON n.id=s.node_id WHERE s.group_id=? ORDER BY n.sort, n.id", (g["id"],))
+        for st in g["status"]:
+            st["ok"] = bool(st["ok"])
+        return g
+
+    def import_groups(self, groups):
+        """anytls-go outbound groups (its GET /api/outbound-groups) -> {anytls id: panel id}.
+        A group with the same name and address is reused; groups the agent manages are skipped."""
+        gmap, created = {}, []
+        for g in groups or []:
+            try:
+                gid, name = int(g["id"]), str(g["name"]).strip()[:64]
+                url = normalize_socks5_url(g["socks5_url"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if gid == 0 or not name or re.match(GROUP_PREFIX + r"\d+ ", name):
+                continue
+            with self.db.lock:
+                old = self.db.get_group_by_name(name)
+                if old and old["socks5_url"] != url:
+                    name = "%s (anytls %d)" % (name[:48], gid)
+                    old = self.db.get_group_by_name(name)
+                if not old:
+                    old = self.db.create_group({"name": name, "socks5_url": url, "note": "imported from anytls"})
+                    created.append(name)
+            gmap[gid] = old["id"]
+        return gmap, created
 
     def auto_reset(self, today=None):
         """Monthly traffic reset for users with reset_day set."""

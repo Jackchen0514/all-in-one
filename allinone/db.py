@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
     reset_day     INTEGER NOT NULL DEFAULT 0,    -- 1..28: auto reset traffic monthly on this day, 0 = off
     traffic_multiplier REAL NOT NULL DEFAULT 1.0, -- counted traffic = actual traffic * multiplier
     ss_port       INTEGER NOT NULL DEFAULT 0,    -- this user's port on every shadowsocks node
+    outbound_group_id INTEGER NOT NULL DEFAULT 0, -- outbound_groups.id, 0 = direct (anytls nodes only)
     last_reset_at INTEGER NOT NULL DEFAULT 0,
     note          TEXT NOT NULL DEFAULT '',
     created_at    INTEGER NOT NULL,
@@ -62,6 +63,27 @@ CREATE TABLE IF NOT EXISTS node_counters (
     PRIMARY KEY (node_id, user_id)
 );
 
+-- Chained SOCKS5 exits users can be routed through (applied on anytls nodes by allinone-agent).
+CREATE TABLE IF NOT EXISTS outbound_groups (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    socks5_url TEXT NOT NULL,                   -- host:port or socks5://user:pass@host:port
+    note       TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- Latest connectivity test of a group, run by the agent on each anytls node.
+CREATE TABLE IF NOT EXISTS outbound_status (
+    group_id   INTEGER NOT NULL,
+    node_id    INTEGER NOT NULL,
+    ok         INTEGER NOT NULL,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    error      TEXT NOT NULL DEFAULT '',
+    checked_at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, node_id)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -80,13 +102,14 @@ CREATE INDEX IF NOT EXISTS idx_traffic_logs_user_ts ON traffic_logs(user_id, ts)
 
 USER_FIELDS = (
     "username", "password", "enabled", "expire_at", "traffic_limit",
-    "upload", "download", "reset_day", "traffic_multiplier", "note", "ss_port",
+    "upload", "download", "reset_day", "traffic_multiplier", "note", "ss_port", "outbound_group_id",
 )
 NODE_FIELDS = (
     "name", "type", "address", "port", "ss_method", "traffic_multiplier", "sni", "insecure", "obfs_password",
     "hop_ports", "hop_interval", "api_url", "api_secret", "enabled", "sort",
 )
 NODE_TYPES = ("hysteria2", "anytls", "shadowsocks")
+GROUP_FIELDS = ("name", "socks5_url", "note")
 
 
 def now() -> int:
@@ -123,7 +146,8 @@ class DB:
                                  ("nodes", "type", "TEXT NOT NULL DEFAULT 'hysteria2'"),
                                  ("nodes", "ss_method", "TEXT NOT NULL DEFAULT 'aes-256-gcm'"),
                                  ("nodes", "agent_version", "TEXT NOT NULL DEFAULT ''"),
-                                 ("nodes", "traffic_multiplier", "REAL NOT NULL DEFAULT 1.0")):
+                                 ("nodes", "traffic_multiplier", "REAL NOT NULL DEFAULT 1.0"),
+                                 ("users", "outbound_group_id", "INTEGER NOT NULL DEFAULT 0")):
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(%s)" % table)}
             if name not in cols:
                 self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, ddl))
@@ -202,6 +226,7 @@ class DB:
             "reset_day": int(data.get("reset_day", 0)),
             "traffic_multiplier": float(data.get("traffic_multiplier", 1.0)),
             "ss_port": int(data.get("ss_port", 0)),
+            "outbound_group_id": int(data.get("outbound_group_id", 0)),
             "last_reset_at": t,
             "note": data.get("note", ""),
             "created_at": t,
@@ -265,8 +290,43 @@ class DB:
         if n:
             with self.tx():
                 self.x("DELETE FROM node_counters WHERE node_id=?", (node_id,))
+                self.x("DELETE FROM outbound_status WHERE node_id=?", (node_id,))
                 self.x("DELETE FROM nodes WHERE id=?", (node_id,))
         return n
+
+    # ---- outbound groups -------------------------------------------------
+    def list_groups(self):
+        return self.q("SELECT * FROM outbound_groups ORDER BY id")
+
+    def get_group(self, group_id):
+        return self.q1("SELECT * FROM outbound_groups WHERE id=?", (group_id,))
+
+    def get_group_by_name(self, name):
+        return self.q1("SELECT * FROM outbound_groups WHERE name=?", (name,))
+
+    def create_group(self, data):
+        t = now()
+        cur = self.x("INSERT INTO outbound_groups(name, socks5_url, note, created_at, updated_at) VALUES(?,?,?,?,?)",
+                     (data["name"], data["socks5_url"], data.get("note", ""), t, t))
+        return self.get_group(cur.lastrowid)
+
+    def update_group(self, group_id, data):
+        sets = {k: v for k, v in data.items() if k in GROUP_FIELDS}
+        if sets:
+            sets["updated_at"] = now()
+            with self.tx():
+                self.x("UPDATE outbound_groups SET %s WHERE id=?" % ",".join(k + "=?" for k in sets),
+                       tuple(sets.values()) + (group_id,))
+                if "socks5_url" in sets:  # old test results no longer apply
+                    self.x("DELETE FROM outbound_status WHERE group_id=?", (group_id,))
+        return self.get_group(group_id)
+
+    def delete_group(self, group_id):
+        """Users of the group fall back to direct."""
+        with self.tx():
+            self.x("UPDATE users SET outbound_group_id=0, updated_at=? WHERE outbound_group_id=?", (now(), group_id))
+            self.x("DELETE FROM outbound_status WHERE group_id=?", (group_id,))
+            self.x("DELETE FROM outbound_groups WHERE id=?", (group_id,))
 
 
 class _Tx:

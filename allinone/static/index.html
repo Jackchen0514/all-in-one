@@ -72,7 +72,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 <header>
   <h1>AllInOne 管理</h1>
   <nav>
-    <a data-p="dash">概览</a><a data-p="users">用户</a><a data-p="nodes">节点</a><a data-p="api">API</a>
+    <a data-p="dash">概览</a><a data-p="users">用户</a><a data-p="nodes">节点</a><a data-p="groups">出口分组</a><a data-p="api">API</a>
   </nav>
   <a id="ver" target="_blank" rel="noopener"></a>
   <button class="sm" id="logout">退出</button>
@@ -108,6 +108,14 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
     </table></div>
   </section>
 
+  <section id="p-groups" class="hide">
+    <div class="bar"><span class="muted" style="flex:1">用户可以指定一个 SOCKS5 链式代理作为出口，未指定的走直连。目前只在 <b>AnyTLS</b> 节点上生效（Hysteria2 / Shadowsocks 不支持按用户分出口，始终直连）。各节点的 agent 每 5 分钟测试一次连通性。</span><button class="pri" id="gAdd">+ 新建分组</button></div>
+    <div class="card tbl"><table>
+      <thead><tr><th>名称</th><th>SOCKS5 地址</th><th>用户数</th><th>连通性（从 AnyTLS 节点测试）</th><th>备注</th><th>操作</th></tr></thead>
+      <tbody id="gBody"></tbody>
+    </table></div>
+  </section>
+
   <section id="p-api" class="hide">
     <div class="card">
       <p>所有接口前缀 <code>/api/v1</code>，请求头携带 <code>Authorization: Bearer &lt;token&gt;</code>。token 可以是配置的 <code>AIO_API_TOKEN</code>，或通过 <code>POST /api/v1/login</code> 获取。</p>
@@ -134,6 +142,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
       <button type="button" class="sm" data-days="30">30 天后</button><button type="button" class="sm" data-days="90">90 天后</button><button type="button" class="sm" data-days="365">1 年后</button></div>
     <label>流量倍数</label><input name="traffic_multiplier" type="number" min="0" max="100" step="0.1" value="1" title="计入的流量 = 实际流量 × 用户倍数 × 节点倍数，0 = 不计流量">
     <label>每月重置日</label><input name="reset_day" type="number" min="0" max="28" placeholder="0 = 不自动重置">
+    <label>出口分组</label><select name="outbound_group_id" title="仅 AnyTLS 节点生效"><option value="0">直连</option></select>
     <label>SS 端口</label><input name="ss_port" type="number" min="1" max="65535" placeholder="留空自动分配" title="该用户在所有 Shadowsocks 节点上的端口">
     <label>启用</label><select name="enabled"><option value="1">是</option><option value="0">否</option></select>
     <label>备注</label><input name="note">
@@ -160,6 +169,16 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
     <p data-t="shadowsocks" class="muted" style="grid-column:1/-1;margin:0">每个用户在所有 Shadowsocks 节点上使用自己的「SS 端口」，由节点上的 allinone-agent 下发到 ssmanager。</p>
     <label>排序</label><input name="sort" type="number" value="0">
     <label>启用</label><select name="enabled"><option value="1">是</option><option value="0">否</option></select>
+  </div>
+  <div class="foot"><button value="cancel" formnovalidate>取消</button><button class="pri" value="ok">保存</button></div>
+</form></dialog>
+
+<dialog id="groupDlg"><form method="dialog" id="groupForm">
+  <h3 id="groupDlgTitle">新建出口分组</h3>
+  <div class="f">
+    <label>名称</label><input name="name" required maxlength="64">
+    <label>SOCKS5 地址</label><input name="socks5_url" required placeholder="host:port 或 socks5://user:pass@host:port">
+    <label>备注</label><input name="note">
   </div>
   <div class="foot"><button value="cancel" formnovalidate>取消</button><button class="pri" value="ok">保存</button></div>
 </form></dialog>
@@ -213,7 +232,7 @@ function go(p) {
   page = p; try { localStorage.setItem("aio_page", p); } catch (e) {}
   document.querySelectorAll("nav a").forEach(a => a.classList.toggle("on", a.dataset.p === p));
   document.querySelectorAll("main>section").forEach(s => s.classList.toggle("hide", s.id !== "p-" + p));
-  ({dash: loadStats, users: loadUsers, nodes: loadNodes, api: loadApi})[p]();
+  (({dash: loadStats, users: loadUsers, nodes: loadNodes, groups: loadGroups, api: loadApi})[p] || loadStats)();
 }
 
 // ---- dashboard ----
@@ -237,14 +256,14 @@ $("#syncAll").onclick = async () => {
 let uOffset = 0; const uLimit = 50; let users = [];
 async function loadUsers() {
   const q = new URLSearchParams({search: $("#uSearch").value, status: $("#uStatus").value, limit: uLimit, offset: uOffset});
-  const r = await api("GET", "/users?" + q);
+  const [r] = await Promise.all([api("GET", "/users?" + q), fetchGroups()]);
   users = r.items;
   $("#uTotal").textContent = `共 ${r.total} 个，第 ${Math.floor(uOffset / uLimit) + 1} 页`;
   $("#uPrev").disabled = uOffset === 0; $("#uNext").disabled = uOffset + uLimit >= r.total;
   $("#uBody").innerHTML = users.map((u, i) => {
     const pct = u.traffic_limit ? Math.min(100, u.used / u.traffic_limit * 100) : 0;
     return `<tr>
-      <td><b>${esc(u.username)}</b><div class="muted">SS 端口 ${u.ss_port || "-"}</div></td>
+      <td><b>${esc(u.username)}</b><div class="muted">SS 端口 ${u.ss_port || "-"}${u.outbound_group_id ? ` · 出口 <b>${esc(groupName(u.outbound_group_id))}</b>` : ""}</div></td>
       <td><span class="tag s-${u.status}">${STATUS[u.status]}</span></td>
       <td class="num">${fmtBytes(u.used)} / ${u.traffic_limit ? fmtBytes(u.traffic_limit) : "不限"}
         <div class="muted">↑${fmtBytes(u.upload)} ↓${fmtBytes(u.download)}${u.traffic_multiplier !== 1 ? ` · <b title="计入的流量 = 实际流量 × ${u.traffic_multiplier}">×${u.traffic_multiplier}</b>` : ""}</div>
@@ -312,9 +331,11 @@ $("#userForm").querySelectorAll("[data-days]").forEach(b => b.onclick = () => {
   const d = Number(b.dataset.days);
   $("#userForm").expire_at.value = d ? toLocalInput(Math.floor(Date.now() / 1000) + d * 86400) : "";
 });
-function openUser(u) {
+async function openUser(u) {
   editing = u ? u.username : null;
+  await fetchGroups();
   const f = $("#userForm"); f.reset(); $("#userDlg").returnValue = "";
+  f.outbound_group_id.innerHTML = '<option value="0">直连</option>' + groups.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join("");
   $("#userDlgTitle").textContent = u ? "编辑用户 " + u.username : "新建用户";
   if (u) {
     f.username.value = u.username; f.password.value = u.password;
@@ -323,6 +344,7 @@ function openUser(u) {
     f.expire_at.value = toLocalInput(u.expire_at); f.reset_day.value = u.reset_day || "";
     f.traffic_multiplier.value = u.traffic_multiplier; f.ss_port.value = u.ss_port || "";
     f.enabled.value = u.enabled ? "1" : "0"; f.note.value = u.note;
+    f.outbound_group_id.value = String(u.outbound_group_id || 0);
   }
   $("#userDlg").showModal();
 }
@@ -333,7 +355,8 @@ $("#userDlg").onclose = async () => {
   const body = {username: f.username.value.trim(), traffic_limit_gb: Number(f.traffic_limit_gb.value || 0),
     expire_at: f.expire_at.value ? Math.floor(new Date(f.expire_at.value).getTime() / 1000) : 0,
     reset_day: Number(f.reset_day.value || 0), enabled: f.enabled.value === "1", note: f.note.value,
-    traffic_multiplier: f.traffic_multiplier.value === "" ? 1 : Number(f.traffic_multiplier.value)};
+    traffic_multiplier: f.traffic_multiplier.value === "" ? 1 : Number(f.traffic_multiplier.value),
+    outbound_group_id: Number(f.outbound_group_id.value || 0)};
   if (f.password.value) body.password = f.password.value;
   if (f.ss_port.value) body.ss_port = Number(f.ss_port.value);
   // only send when edited, so traffic counted while the dialog was open is not overwritten
@@ -435,6 +458,54 @@ $("#nodeDlg").onclose = async () => {
   } catch (e) { $("#nodeDlg").showModal(); }
 };
 
+// ---- outbound groups ----
+let groups = [];
+async function fetchGroups() { groups = (await api("GET", "/outbound-groups")).items; return groups; }
+function groupName(id) { const g = groups.find(x => x.id === id); return g ? g.name : "#" + id; }
+function maskUrl(u) { return u.replace(/^(socks5?:\/\/[^:@\/]*:).*@/, "$1***@"); }
+function groupStatus(g) {
+  if (!g.status.length) return '<span class="muted">尚无结果（需要 AnyTLS 节点的 agent v0.2+）</span>';
+  return g.status.map(s => `<div>${esc(s.node)}：${s.ok ? `<span class="tag s-active">${s.latency_ms} ms</span>` : `<span class="tag s-expired" title="${esc(s.error)}">不通</span>`} <span class="muted">${rel(s.checked_at)}</span></div>`).join("");
+}
+async function loadGroups() {
+  await fetchGroups();
+  $("#gBody").innerHTML = groups.map((g, i) => `<tr>
+    <td><b>${esc(g.name)}</b></td>
+    <td><code>${esc(maskUrl(g.socks5_url))}</code></td>
+    <td class="num">${g.users}</td>
+    <td>${groupStatus(g)}</td>
+    <td class="muted">${esc(g.note)}</td>
+    <td><div class="acts"><button class="sm" data-a="edit" data-i="${i}">编辑</button><button class="sm danger" data-a="del" data-i="${i}">删除</button></div></td></tr>`).join("")
+    || `<tr><td colspan="6" class="muted" style="text-align:center;padding:30px">暂无分组，所有用户直连</td></tr>`;
+}
+let editingGroup = null;
+function openGroup(g) {
+  editingGroup = g ? g.id : null;
+  const f = $("#groupForm"); f.reset(); $("#groupDlg").returnValue = "";
+  $("#groupDlgTitle").textContent = g ? "编辑出口分组" : "新建出口分组";
+  if (g) { f.name.value = g.name; f.socks5_url.value = g.socks5_url; f.note.value = g.note; }
+  $("#groupDlg").showModal();
+}
+$("#gAdd").onclick = () => openGroup(null);
+$("#gBody").onclick = async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const g = groups[b.dataset.i];
+  if (b.dataset.a === "edit") return openGroup(g);
+  if (b.dataset.a === "del") {
+    if (!confirm(`确认删除出口分组 ${g.name}？${g.users ? `\n使用它的 ${g.users} 个用户将改为直连。` : ""}`)) return;
+    await api("DELETE", "/outbound-groups/" + g.id); toast("已删除"); loadGroups();
+  }
+};
+$("#groupDlg").onclose = async () => {
+  if ($("#groupDlg").returnValue !== "ok") return;
+  const f = $("#groupForm");
+  const body = {name: f.name.value.trim(), socks5_url: f.socks5_url.value.trim(), note: f.note.value};
+  try {
+    if (editingGroup) await api("PATCH", "/outbound-groups/" + editingGroup, body); else await api("POST", "/outbound-groups", body);
+    toast("已保存，AnyTLS 节点将在 30 秒内应用"); loadGroups();
+  } catch (e) { $("#groupDlg").showModal(); }
+};
+
 // ---- api page ----
 function loadApi() {
   $("#curToken").textContent = token;
@@ -448,6 +519,10 @@ curl -X POST ${location.origin}/api/v1/users/alice/extend -H "Authorization: Bea
 
 # 设置已用流量为 12.5GB（{"bytes":n} 按字节；{"upload":n,"download":n} 分别设置；{"add_gb":-2} 增减）
 curl -X POST ${location.origin}/api/v1/users/alice/set-traffic -H "Authorization: Bearer $TOKEN" -d '{"gb":12.5}'
+
+# 新建出口分组，并让 alice 走这个出口（仅 AnyTLS 节点生效）
+curl -X POST ${location.origin}/api/v1/outbound-groups -H "Authorization: Bearer $TOKEN" -d '{"name":"US","socks5_url":"socks5://u:p@1.2.3.4:1080"}'
+curl -X PATCH ${location.origin}/api/v1/users/alice -H "Authorization: Bearer $TOKEN" -d '{"outbound_group_id":1}'
 
 # 重置流量
 curl -X POST ${location.origin}/api/v1/users/alice/reset-traffic -H "Authorization: Bearer $TOKEN"`;

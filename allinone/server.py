@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import REPO_URL, __version__, commit
 from .db import NODE_TYPES, gen_token, now
-from .service import GB, SS_METHODS, Service
+from .service import GB, SS_METHODS, Service, normalize_socks5_url
 
 log = logging.getLogger("allinone")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -119,7 +119,15 @@ def parse_user_input(body, creating):
         out["note"] = str(body["note"])[:500]
     if "ss_port" in body:
         out["ss_port"] = _int(body["ss_port"], "ss_port", 1, 65535)
+    if "outbound_group_id" in body:
+        out["outbound_group_id"] = _int(body["outbound_group_id"] or 0, "outbound_group_id", 0)
     return out
+
+
+def _check_group_ref(svc, data):
+    gid = data.get("outbound_group_id")
+    if gid and not svc.db.get_group(gid):
+        raise APIError(400, "outbound group %d does not exist" % gid)
 
 
 NODE_STR = ("name", "address", "port", "sni", "obfs_password", "hop_ports", "api_url", "api_secret")
@@ -228,6 +236,7 @@ def api_users(h, svc, m, body):
 @route("POST", "/api/v1/users")
 def api_user_create(h, svc, m, body):
     data = parse_user_input(body, creating=True)
+    _check_group_ref(svc, data)
     if svc.db.get_user(data["username"]):
         raise APIError(409, "username already exists")
     try:
@@ -253,6 +262,7 @@ def api_user_get(h, svc, m, body):
 def api_user_update(h, svc, m, body):
     old = _get_user(svc, m["name"])
     data = parse_user_input(body, creating=False)
+    _check_group_ref(svc, data)
     if "username" in data and data["username"] != old["username"] and svc.db.get_user(data["username"]):
         raise APIError(409, "username already exists")
     try:
@@ -357,15 +367,78 @@ def api_user_traffic(h, svc, m, body):
 
 @route("POST", "/api/v1/import")
 def api_import(h, svc, m, body):
-    """Body: {"source": "anytls" | "ssmanager", "items": [...]} -- see Service.import_users."""
+    """Body: {"source": "anytls" | "ssmanager", "items": [...], "outbound_groups": [...]}
+    -- see Service.import_users (outbound_groups: anytls-go's GET /api/outbound-groups)."""
     if body.get("source") not in ("anytls", "ssmanager"):
         raise APIError(400, "source must be anytls or ssmanager")
     if not isinstance(body.get("items"), list):
         raise APIError(400, "items must be a list")
+    if not isinstance(body.get("outbound_groups", []), (list, type(None))):
+        raise APIError(400, "outbound_groups must be a list")
     try:
-        return svc.import_users(body["source"], body["items"])
+        return svc.import_users(body["source"], body["items"], body.get("outbound_groups"))
     except ValueError as e:
         raise APIError(409, str(e))
+
+
+# ---- outbound groups ----
+def parse_group_input(body, creating):
+    out = {}
+    if "name" in body or creating:
+        out["name"] = str(body.get("name") or "").strip()
+        if not out["name"] or len(out["name"]) > 64:
+            raise APIError(400, "name is required (at most 64 chars)")
+    if "socks5_url" in body or creating:
+        try:
+            out["socks5_url"] = normalize_socks5_url(body.get("socks5_url"))
+        except ValueError as e:
+            raise APIError(400, str(e))
+    if "note" in body:
+        out["note"] = str(body["note"] or "")[:500]
+    return out
+
+
+def _get_group(svc, gid):
+    g = svc.db.get_group(_int(gid, "id"))
+    if not g:
+        raise APIError(404, "outbound group not found")
+    return g
+
+
+@route("GET", "/api/v1/outbound-groups")
+def api_groups(h, svc, m, body):
+    return {"items": [svc.present_group(g) for g in svc.db.list_groups()]}
+
+
+@route("POST", "/api/v1/outbound-groups")
+def api_group_create(h, svc, m, body):
+    data = parse_group_input(body, creating=True)
+    try:
+        return svc.present_group(svc.db.create_group(data)), 201
+    except sqlite3.IntegrityError:
+        raise APIError(409, "outbound group name already exists")
+
+
+@route("GET", "/api/v1/outbound-groups/{id}")
+def api_group_get(h, svc, m, body):
+    return svc.present_group(_get_group(svc, m["id"]))
+
+
+@route("PATCH", "/api/v1/outbound-groups/{id}")
+def api_group_update(h, svc, m, body):
+    g = _get_group(svc, m["id"])
+    try:
+        return svc.present_group(svc.db.update_group(g["id"], parse_group_input(body, creating=False)))
+    except sqlite3.IntegrityError:
+        raise APIError(409, "outbound group name already exists")
+
+
+@route("DELETE", "/api/v1/outbound-groups/{id}")
+def api_group_delete(h, svc, m, body):
+    g = _get_group(svc, m["id"])
+    users = svc.present_group(g)["users"]
+    svc.db.delete_group(g["id"])
+    return {"deleted": g["id"], "users_moved_to_direct": users}
 
 
 # ---- nodes ----

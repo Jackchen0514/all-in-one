@@ -1084,16 +1084,28 @@ install_anytls_node() {
   IFS=$'\x1f' read -r existing _ < <(find_node anytls) || true
   if [ -z "$existing" ] && [ -n "$api_key" ] && systemctl is-active -q anytls-server 2>/dev/null; then
     local api; api="$(unit_flag "$unit" -api-listen)"; api="${api:-$AT_API}"
-    local users=""
-    users="$(curl -fsSk -m 10 -H "Authorization: Bearer $api_key" "https://$api/api/users" 2>/dev/null \
-          || curl -fsS -m 10 -H "Authorization: Bearer $api_key" "http://$api/api/users" 2>/dev/null || true)"
+    local users="" groups=""
+    at_get() {  # the admin API is HTTPS when anytls has a certificate, plain HTTP otherwise
+      curl -fsSk -m 10 -H "Authorization: Bearer $api_key" "https://$api$1" 2>/dev/null \
+        || curl -fsS -m 10 -H "Authorization: Bearer $api_key" "http://$api$1" 2>/dev/null || true
+    }
+    users="$(at_get /api/users)"
+    groups="$(at_get /api/outbound-groups)"   # outbound groups (anytls-go >= v0.0.33)
     if [ -n "$users" ] && [ "$users" != "[]" ]; then
-      info "[anytls] importing users of the existing anytls-go server into the panel"
+      info "[anytls] importing users (and outbound groups) of the existing anytls-go server into the panel"
       local res
-      res="$(echo "$users" | python3 -c 'import json,sys; print(json.dumps({"source":"anytls","items":json.load(sys.stdin)}))' \
+      res="$(GROUPS_JSON="${groups:-[]}" python3 -c 'import json,os,sys
+try:
+    groups = json.loads(os.environ["GROUPS_JSON"])
+except ValueError:
+    groups = []
+print(json.dumps({"source": "anytls", "items": json.load(sys.stdin),
+                  "outbound_groups": groups if isinstance(groups, list) else []}))' <<<"$users" \
             | panel_api POST /import -)" || die "importing anytls users into the panel failed"
       adopted="$(echo "$res" | python3 -c 'import json,sys; r=json.load(sys.stdin)
-print("导入 %d 个用户%s" % (len(r["created"]), "，跳过 %d 个: %s" % (len(r["skipped"]), ", ".join("%s(%s)" % (x["item"], x["reason"]) for x in r["skipped"])) if r["skipped"] else ""))')"
+g = r.get("groups_created") or []
+print("导入 %d 个用户%s%s" % (len(r["created"]), "、%d 个出口分组 (%s)" % (len(g), ", ".join(g)) if g else "",
+      "，跳过 %d 个: %s" % (len(r["skipped"]), ", ".join("%s(%s)" % (x["item"], x["reason"]) for x in r["skipped"])) if r["skipped"] else ""))')"
       info "[anytls] $adopted"
     fi
   fi

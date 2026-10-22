@@ -19,10 +19,12 @@ from tests import test_api
 
 
 class FakeAnyTLS:
-    """Mimics anytls-server's /api/users admin API."""
+    """Mimics anytls-server's /api/users admin API (and /api/outbound-groups when groups=True,
+    like anytls-go >= v0.0.34)."""
 
-    def __init__(self, key="k"):
+    def __init__(self, key="k", groups=False):
         self.users, self.next_id, self.calls = {}, 1, []
+        self.groups, self.next_gid, self.tested = {}, 1, []
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -43,6 +45,9 @@ class FakeAnyTLS:
                 body = json.loads(self.rfile.read(n)) if n else {}
                 fake.calls.append((self.command, self.path))
                 m = re.match(r"^/api/users/(\d+)$", self.path)
+                g = re.match(r"^/api/outbound-groups(?:/(\d+))?(/test)?$", self.path)
+                if g and groups:
+                    return self._groups(g, body)
                 if self.path == "/api/users" and self.command == "GET":
                     return self._reply(200, [dict(u, usage={"traffic_used_bytes": u["used"], "active_conns": u["conns"]})
                                              for u in fake.users.values()])
@@ -52,6 +57,8 @@ class FakeAnyTLS:
                          "traffic_limit_bytes": body.get("traffic_limit_bytes", 0),
                          "traffic_multiplier": body.get("traffic_multiplier", 0),
                          "traffic_reset_cycle": body.get("traffic_reset_cycle", "none"), "used": 0, "conns": 0}
+                    if groups:
+                        u["outbound_group_id"] = body.get("outbound_group_id", 0)
                     fake.users[u["id"]] = u
                     fake.next_id += 1
                     return self._reply(201, u)
@@ -67,6 +74,36 @@ class FakeAnyTLS:
                         del fake.users[u["id"]]
                         return self._reply(204)
                 return self._reply(404, {"error": "not found"})
+
+            def _groups(self, g, body):
+                gid = int(g.group(1)) if g.group(1) else None
+                if gid is None and self.command == "GET":
+                    return self._reply(200, [{"id": 0, "name": "直连", "socks5_url": ""}] + list(fake.groups.values()))
+                if gid is None and self.command == "POST":
+                    if any(x["name"] == body["name"] for x in fake.groups.values()):
+                        return self._reply(409, {"error": "outbound group name already exists"})
+                    x = {"id": fake.next_gid, "name": body["name"], "socks5_url": body["socks5_url"]}
+                    fake.groups[x["id"]] = x
+                    fake.next_gid += 1
+                    return self._reply(201, x)
+                if gid not in fake.groups:
+                    return self._reply(404, {"error": "outbound group not found"})
+                x = fake.groups[gid]
+                if g.group(2):
+                    fake.tested.append(gid)
+                    if x["socks5_url"].startswith("bad"):
+                        return self._reply(200, {"target": "1.1.1.1:443", "success": False, "error": "connection refused"})
+                    return self._reply(200, {"target": "1.1.1.1:443", "success": True, "latency_ms": 42})
+                if self.command == "PUT":
+                    x.update({k: body[k] for k in ("name", "socks5_url") if k in body})
+                    return self._reply(200, x)
+                if self.command == "DELETE":
+                    del fake.groups[gid]
+                    for u in fake.users.values():
+                        if u.get("outbound_group_id") == gid:
+                            u["outbound_group_id"] = 0
+                    return self._reply(204)
+                return self._reply(405, {"error": "method not allowed"})
 
             do_GET = do_POST = do_PUT = do_DELETE = _handle
 
@@ -409,6 +446,105 @@ class MultiTest(test_api.APITest):
         self.assertEqual(self.call("POST", "/api/v1/users/nobody/set-traffic", {"gb": 1})[0], 404)
         _, u, _ = self.call("GET", "/api/v1/users/su")
         self.assertEqual(u["used"], 7)
+
+    def test_outbound_groups_api(self):
+        s, g, _ = self.call("POST", "/api/v1/outbound-groups", {"name": "US", "socks5_url": "127.0.0.1:1080"})
+        self.assertEqual((s, g["name"], g["users"], g["status"]), (201, "US", 0, []))
+        for bad in ({"name": "", "socks5_url": "1.2.3.4:1080"}, {"name": "x", "socks5_url": ""},
+                    {"name": "x", "socks5_url": "1.2.3.4"}, {"name": "x", "socks5_url": "http://1.2.3.4:80"},
+                    {"name": "x", "socks5_url": "1.2.3.4:99999"}, {"name": "x" * 65, "socks5_url": "a:1"}):
+            self.assertEqual(self.call("POST", "/api/v1/outbound-groups", bad)[0], 400, bad)
+        self.assertEqual(self.call("POST", "/api/v1/outbound-groups", {"name": "US", "socks5_url": "a:1"})[0], 409)
+        _, g2, _ = self.call("POST", "/api/v1/outbound-groups", {"name": "JP", "socks5_url": "socks5://u:p@jp.example:1080"})
+        self.assertEqual(self.call("PATCH", "/api/v1/outbound-groups/%d" % g2["id"], {"name": "US"})[0], 409)
+        _, g2, _ = self.call("PATCH", "/api/v1/outbound-groups/%d" % g2["id"], {"note": "tokyo"})
+        self.assertEqual((g2["name"], g2["note"]), ("JP", "tokyo"))
+        # users reference a group; unknown ids are rejected; deleting a group moves users to direct
+        u = self.user("gus", outbound_group_id=g["id"])
+        self.assertEqual(u["outbound_group_id"], g["id"])
+        self.assertEqual(self.call("POST", "/api/v1/users", {"username": "x1", "outbound_group_id": 999})[0], 400)
+        self.assertEqual(self.call("PATCH", "/api/v1/users/gus", {"outbound_group_id": 999})[0], 400)
+        self.assertEqual(self.call("PATCH", "/api/v1/users/gus", {"outbound_group_id": -1})[0], 400)
+        self.assertEqual(self.call("GET", "/api/v1/outbound-groups/%d" % g["id"])[1]["users"], 1)
+        _, d, _ = self.call("DELETE", "/api/v1/outbound-groups/%d" % g["id"])
+        self.assertEqual(d["users_moved_to_direct"], 1)
+        self.assertEqual(self.call("GET", "/api/v1/users/gus")[1]["outbound_group_id"], 0)
+        self.assertEqual(self.call("GET", "/api/v1/outbound-groups/%d" % g["id"])[0], 404)
+        self.assertEqual([x["name"] for x in self.call("GET", "/api/v1/outbound-groups")[1]["items"]], ["JP"])
+
+    def test_agent_anytls_outbound_groups(self):
+        fake = FakeAnyTLS(groups=True)
+        self.addCleanup(fake.close)
+        # a group created by hand on the server is left alone
+        fake.groups[50] = {"id": 50, "name": "manual", "socks5_url": "9.9.9.9:1080"}
+        fake.next_gid = 51
+        n = self.node(name="AT", type="anytls", address="a", port="8443")
+        _, us, _ = self.call("POST", "/api/v1/outbound-groups", {"name": "US", "socks5_url": "127.0.0.1:1080"})
+        _, bad, _ = self.call("POST", "/api/v1/outbound-groups", {"name": "Dead", "socks5_url": "bad.example:1"})
+        self.user("amy", password="amypass1", outbound_group_id=us["id"])
+        self.user("bob", password="bobpass1")
+        agent = self.write_agent_config([{"token": n["auth_token"], "type": "anytls", "api": fake.url, "api_key": "k"}])
+        self.assertTrue(agent.run_once()[0])
+        names = {x["name"]: x for x in fake.groups.values()}
+        self.assertEqual(sorted(names), sorted(["manual", "aio-%d US" % us["id"], "aio-%d Dead" % bad["id"]]))
+        self.assertEqual(fake.by_name("amy")["outbound_group_id"], names["aio-%d US" % us["id"]]["id"])
+        self.assertEqual(fake.by_name("bob")["outbound_group_id"], 0)
+        self.assertEqual(len(fake.tested), 2)
+        # test results reach the panel with the next report
+        agent.run_once()
+        st = {x["name"]: x["status"] for x in self.call("GET", "/api/v1/outbound-groups")[1]["items"]}
+        self.assertEqual([(x["node"], x["ok"], x["latency_ms"]) for x in st["US"]], [("AT", True, 42)])
+        self.assertEqual((st["Dead"][0]["ok"], st["Dead"][0]["error"]), (False, "connection refused"))
+        # steady state: no writes, no re-test within TEST_EVERY
+        fake.calls.clear()
+        agent.run_once()
+        self.assertEqual({c[0] for c in fake.calls}, {"GET"})
+        self.assertEqual(len(fake.tested), 2)
+        # rename + new address -> PUT and an immediate re-test; old status is dropped in the panel
+        self.call("PATCH", "/api/v1/outbound-groups/%d" % us["id"], {"name": "USA", "socks5_url": "127.0.0.1:1081"})
+        self.assertEqual(self.call("GET", "/api/v1/outbound-groups/%d" % us["id"])[1]["status"], [])
+        agent.run_once()
+        x = fake.groups[names["aio-%d US" % us["id"]]["id"]]
+        self.assertEqual((x["name"], x["socks5_url"]), ("aio-%d USA" % us["id"], "127.0.0.1:1081"))
+        self.assertEqual(len(fake.tested), 3)
+        # moving a user and deleting a group propagate; the hand-made group survives
+        self.call("PATCH", "/api/v1/users/bob", {"outbound_group_id": bad["id"]})
+        self.call("DELETE", "/api/v1/outbound-groups/%d" % us["id"])
+        agent.run_once()
+        self.assertEqual(sorted(x["name"] for x in fake.groups.values()), sorted(["manual", "aio-%d Dead" % bad["id"]]))
+        self.assertEqual(fake.by_name("amy")["outbound_group_id"], 0)
+        self.assertEqual(fake.by_name("bob")["outbound_group_id"], names["aio-%d Dead" % bad["id"]]["id"])
+
+    def test_agent_anytls_too_old_for_groups(self):
+        fake = FakeAnyTLS()  # no /api/outbound-groups
+        self.addCleanup(fake.close)
+        n = self.node(name="AT", type="anytls", address="a", port="8443")
+        agent = self.write_agent_config([{"token": n["auth_token"], "type": "anytls", "api": fake.url, "api_key": "k"}])
+        _, g, _ = self.call("POST", "/api/v1/outbound-groups", {"name": "US", "socks5_url": "127.0.0.1:1080"})
+        self.user("cat", password="catpass1")
+        self.assertTrue(agent.run_once()[0])  # groups exist but nobody uses them: fine
+        self.call("PATCH", "/api/v1/users/cat", {"outbound_group_id": g["id"]})
+        self.assertFalse(agent.run_once()[0])
+        agent.run_once()
+        self.assertIn("too old for outbound groups", self.call("GET", "/api/v1/nodes/%d" % n["id"])[1]["last_error"])
+
+    def test_import_anytls_groups(self):
+        self.call("POST", "/api/v1/outbound-groups", {"name": "HK", "socks5_url": "8.8.8.8:1080"})
+        groups = [{"id": 0, "name": "直连", "socks5_url": ""},
+                  {"id": 3, "name": "US", "socks5_url": "1.2.3.4:1080"},
+                  {"id": 4, "name": "HK", "socks5_url": "8.8.8.8:1080"},       # same as the panel's -> reused
+                  {"id": 5, "name": "HK", "socks5_url": "7.7.7.7:1080"},       # clash -> renamed
+                  {"id": 6, "name": "aio-9 X", "socks5_url": "6.6.6.6:1080"},  # agent-managed -> skipped
+                  {"id": 7, "name": "Bad", "socks5_url": "nope"}]
+        items = [{"id": i, "username": n, "password": n + "pass1", "enabled": True, "outbound_group_id": gid}
+                 for i, (n, gid) in enumerate([("ia", 3), ("ib", 4), ("ic", 5), ("id", 0), ("ie", 7)], 1)]
+        s, r, _ = self.call("POST", "/api/v1/import", {"source": "anytls", "items": items, "outbound_groups": groups})
+        self.assertEqual(s, 200, r)
+        self.assertEqual(sorted(r["groups_created"]), ["HK (anytls 5)", "US"])
+        byname = {g["name"]: g["id"] for g in self.call("GET", "/api/v1/outbound-groups")[1]["items"]}
+        got = {n: self.call("GET", "/api/v1/users/" + n)[1]["outbound_group_id"] for n in ("ia", "ib", "ic", "id", "ie")}
+        self.assertEqual(got, {"ia": byname["US"], "ib": byname["HK"], "ic": byname["HK (anytls 5)"], "id": 0, "ie": 0})
+        self.assertEqual(self.call("POST", "/api/v1/import", {"source": "anytls", "items": [], "outbound_groups": {}})[0], 400)
 
     def test_node_traffic_multiplier(self):
         hy = self.add_node(traffic_multiplier=2)

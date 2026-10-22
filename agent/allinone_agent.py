@@ -7,7 +7,9 @@ Every cycle, for each node listed in the config:
      <panel>/agent/<token>/report (the panel turns them into deltas, applies limits and history);
   2. GET <panel>/agent/<token>/state and apply it:
        anytls      -> local admin API (/api/users): create / update / delete users; inactive users
-                      are disabled with an expiry in the past so open sessions are cut too
+                      are disabled with an expiry in the past so open sessions are cut too.
+                      The panel's outbound groups (SOCKS5 chain proxies) are kept in sync as
+                      anytls groups named "aio-<id> <name>" and tested every few minutes.
        shadowsocks -> local ssmanager manager protocol (UDP): add / remove one port per user
 
 Only outbound connections to the panel are needed. Config (default /etc/allinone/agent.json):
@@ -23,6 +25,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -32,9 +35,12 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 STATE_DIR = os.environ.get("AIO_AGENT_STATE_DIR", "/var/lib/allinone-agent")
 BLOCKED_UNTIL = "2000-01-01T00:00:00Z"  # anytls expiry used to block an inactive user
+GROUP_RE = re.compile(r"^aio-(\d+) ")     # anytls outbound groups managed by the agent
+TEST_EVERY = 300                         # seconds between connectivity tests of a group
+TESTS_PER_CYCLE = 5                      # each test can take up to ~5 s
 log = logging.getLogger("allinone-agent")
 
 
@@ -95,9 +101,11 @@ class AnyTLS:
 
     NEUTRAL = {"traffic_limit_bytes": 0, "traffic_multiplier": 1.0, "traffic_reset_cycle": "none"}
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, memo=None):
         self.api = cfg.get("api", "https://127.0.0.1:8843").rstrip("/")
         self.key = cfg.get("api_key", "")
+        # kept across cycles by Agent: {"tests": {panel group id: result}, "no_test": bool}
+        self.memo = memo if memo is not None else {}
 
     def _call(self, method, path, body=None):
         # anytls reuses its public certificate for the admin API, which never matches 127.0.0.1
@@ -118,13 +126,80 @@ class AnyTLS:
         exp = u.get("expires_at") or ""
         return not u.get("enabled") or not (exp == "" or exp.startswith("0001-"))
 
+    def sync_groups(self, want_groups, needed):
+        """Create / update the managed anytls groups. Returns ({panel id: anytls id}, stale groups,
+        changes), or (None, [], 0) when this anytls-server has no outbound groups (< v0.0.33)."""
+        try:
+            have = self._call("GET", "/api/outbound-groups") or []
+        except AgentError as e:
+            if "HTTP 404" not in str(e):
+                raise
+            if needed:
+                raise AgentError("anytls-server is too old for outbound groups (needs v0.0.33+); "
+                                 "run update.sh on this node")
+            return None, [], 0
+        managed = {}
+        for g in have:
+            m = GROUP_RE.match(g.get("name") or "")
+            if m and g.get("id"):
+                managed[int(m.group(1))] = g
+        gmap, changed = {}, 0
+        for w in want_groups:
+            name = "aio-%d %s" % (w["id"], w["name"])
+            h = managed.pop(w["id"], None)
+            if h is None:
+                h = self._call("POST", "/api/outbound-groups", {"name": name, "socks5_url": w["socks5_url"]})
+                changed += 1
+            elif h.get("name") != name or h.get("socks5_url") != w["socks5_url"]:
+                self._call("PUT", "/api/outbound-groups/%d" % h["id"], {"name": name, "socks5_url": w["socks5_url"]})
+                changed += 1
+            gmap[w["id"]] = h["id"]
+        return gmap, list(managed.values()), changed
+
+    def test_groups(self, want_groups, gmap):
+        """Connectivity test of each group from this server, every TEST_EVERY seconds (and right
+        after its address changes). Results are reported to the panel on the next cycle."""
+        tests = self.memo.setdefault("tests", {})
+        for gid in [g for g in tests if g not in gmap]:
+            del tests[gid]
+        if self.memo.get("no_test"):
+            return
+        t, done = int(time.time()), 0
+        for w in want_groups:
+            old = tests.get(w["id"])
+            if done >= TESTS_PER_CYCLE or w["id"] not in gmap or \
+                    (old and old["url"] == w["socks5_url"] and t - old["at"] < TEST_EVERY):
+                continue
+            done += 1
+            try:
+                r = self._call("POST", "/api/outbound-groups/%d/test" % gmap[w["id"]], {}) or {}
+            except AgentError as e:
+                if "HTTP 404" in str(e):  # anytls-server v0.0.33 has groups but no test endpoint
+                    self.memo["no_test"] = True
+                    return
+                r = {"success": False, "error": str(e)}
+            tests[w["id"]] = {"ok": bool(r.get("success")), "latency_ms": int(r.get("latency_ms") or 0),
+                              "error": str(r.get("error") or "")[:300], "at": t, "url": w["socks5_url"]}
+
+    def results(self):
+        return {str(gid): {k: v for k, v in res.items() if k != "url"}
+                for gid, res in self.memo.get("tests", {}).items()}
+
     def apply(self, state):
         have = self.users()
         want = {u["username"]: u for u in state.get("users", [])}
         changed = 0
+        # outbound groups: absent from the state of an older panel -> leave them alone
+        want_groups = state.get("outbound_groups")
+        gmap, stale = None, []
+        if want_groups is not None:
+            needed = bool(want_groups) and any(u.get("outbound_group_id") for u in want.values())
+            gmap, stale, changed = self.sync_groups(want_groups, needed)
         for name, w in want.items():
             body = {"password": w["password"], "enabled": bool(w["active"]),
                     "expires_at": "" if w["active"] else BLOCKED_UNTIL}
+            if gmap is not None:
+                body["outbound_group_id"] = gmap.get(w.get("outbound_group_id") or 0, 0)
             h = have.get(name)
             if h is None:
                 body.update(self.NEUTRAL, username=name)
@@ -132,7 +207,9 @@ class AnyTLS:
                 changed += 1
                 continue
             neutral = all(h.get(k) == v for k, v in self.NEUTRAL.items())
-            if h.get("password") != w["password"] or self._blocked(h) == bool(w["active"]) or not neutral:
+            group_ok = gmap is None or h.get("outbound_group_id", 0) == body["outbound_group_id"]
+            if h.get("password") != w["password"] or self._blocked(h) == bool(w["active"]) or not neutral \
+                    or not group_ok:
                 body.update(self.NEUTRAL)
                 self._call("PUT", "/api/users/%d" % h["id"], body)
                 changed += 1
@@ -140,6 +217,11 @@ class AnyTLS:
             if name not in want:
                 self._call("DELETE", "/api/users/%d" % h["id"])
                 changed += 1
+        for g in stale:  # after users moved off them
+            self._call("DELETE", "/api/outbound-groups/%d" % g["id"])
+            changed += 1
+        if gmap:
+            self.test_groups(want_groups, gmap)
         return changed
 
 
@@ -252,7 +334,7 @@ class Shadowsocks:
         return changed
 
 
-DRIVERS = {"anytls": lambda c: AnyTLS(c), "shadowsocks": lambda c: Shadowsocks(c, c["token"])}
+DRIVERS = {"anytls": lambda c, memo: AnyTLS(c, memo), "shadowsocks": lambda c, memo: Shadowsocks(c, c["token"])}
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +342,7 @@ class Agent:
     def __init__(self, config_path):
         self.config_path = config_path
         self.errors = {}  # token -> last apply error, reported on the next cycle
+        self.memo = {}    # token -> driver state kept across cycles (anytls group tests)
 
     def load_config(self):
         with open(self.config_path) as f:
@@ -272,13 +355,15 @@ class Agent:
         token = node["token"]
         if node.get("type") not in DRIVERS:
             raise AgentError("unknown node type %r" % node.get("type"))
-        drv = DRIVERS[node["type"]](node)
+        drv = DRIVERS[node["type"]](node, self.memo.setdefault(token, {}))
         base = "%s/agent/%s" % (panel.rstrip("/"), token)
         report = {"counters": {}, "online": 0, "version": VERSION, "error": self.errors.pop(token, "")}
         try:
             report["counters"], report["online"] = drv.collect()
         except AgentError as e:
             report["error"] = report["error"] or str(e)
+        if hasattr(drv, "results"):
+            report["outbounds"] = drv.results()
         http_json("POST", base + "/report", report)
         state = http_json("GET", base + "/state")
         if state.get("type") != node["type"]:
