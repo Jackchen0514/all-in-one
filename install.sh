@@ -62,7 +62,7 @@ DOMAIN=""; NODE_DOMAIN=""; CF_TOKEN="${CF_TOKEN:-}"; EMAIL=""
 PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
 PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0; HOP=""; HOP_SET=0
 TYPES="hysteria2,anytls,ss"; AT_PORT=""; AT_API_PORT=""; SS_METHOD=""; SS_MGR_PORT=""; SS_RANGE=""
-HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
+HY_TAKEOVER=0; HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
 
 usage() { cat <<'EOF'
 Usage:
@@ -98,6 +98,9 @@ Options:
   --hop RANGE         port hopping, e.g. 20000-30000 ("" disables; default: keep the panel's setting)
   --stats-port P      traffic stats API port, TCP (default 9999)
   --hy-version V      hysteria version, e.g. v2.6.1 (default latest)
+  --hy-takeover       replace a Hysteria2 that was not installed by allinone / hysteria-manager
+                      (its config.yaml is backed up first). Without it the installer refuses,
+                      and update / uninstall leave such a Hysteria2 alone.
 
   anytls:
   --anytls-port P     TCP port (default 443, 8443 when the panel uses TCP 443 on this machine;
@@ -142,6 +145,7 @@ while [ $# -gt 0 ]; do
     --hop) HOP="$2"; HOP_SET=1; shift 2;;
     --stats-port) STATS_PORT="$2"; shift 2;;
     --hy-version) HY_VERSION="$2"; shift 2;;
+    --hy-takeover) HY_TAKEOVER=1; shift;;
     --anytls-port) AT_PORT="$2"; shift 2;;
     --anytls-api-port) AT_API_PORT="$2"; shift 2;;
     --ss-manager-port) SS_MGR_PORT="$2"; shift 2;;
@@ -651,8 +655,22 @@ install_hysteria_bin() {
   mv -f "$HY_BIN.new" "$HY_BIN"
 }
 
+# hy_is_ours: the Hysteria2 in $HY_CONF_DIR authenticates against a panel (allinone or the old
+# hysteria-manager, which allinone adopts). Anything else was installed by someone else.
+hy_is_ours() { grep -qs '/hy2/auth/' "$HY_CONF_DIR/config.yaml"; }
+hy_is_foreign() { [ -f "$HY_CONF_DIR/config.yaml" ] && ! hy_is_ours; }
+
 install_hysteria_node() {
   info "[hysteria2] installing"
+  if hy_is_foreign; then
+    [ "$HY_TAKEOVER" = 1 ] || die "a Hysteria2 not managed by allinone is already installed ($HY_CONF_DIR/config.yaml).
+       Its config would be replaced. Either skip hysteria2 (--type anytls,ss), or take it over
+       with --hy-takeover (the current config.yaml is backed up first; its users stop working)."
+    local bak; bak="$HY_CONF_DIR/config.yaml.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -a "$HY_CONF_DIR/config.yaml" "$bak"
+    [ -f /etc/systemd/system/hysteria-server.service ] && cp -a /etc/systemd/system/hysteria-server.service "$bak.service"
+    warn "taking over the existing Hysteria2; old config backed up to $bak"
+  fi
   command -v iptables >/dev/null || install_pkgs iptables || warn "iptables not available: port hopping will not work"
   install_hysteria_bin
   id "$HY_USER" >/dev/null 2>&1 || useradd --system --home-dir "$HY_DATA_DIR" --shell /usr/sbin/nologin "$HY_USER"
@@ -1473,7 +1491,8 @@ ss_install_tag() { install_ssrust_bin; }
 update_all() {
   local panel=0 hy=0 agent=0 at=0 ss=0
   [ -f /etc/systemd/system/allinone.service ] && [ -d "$PANEL_DIR/allinone" ] && panel=1
-  [ -f /etc/systemd/system/hysteria-server.service ] && [ -f "$HY_CONF_DIR/config.yaml" ] && hy=1
+  [ -f /etc/systemd/system/hysteria-server.service ] && hy_is_ours && hy=1
+  if hy_is_foreign; then info "leaving the existing Hysteria2 alone (not managed by allinone)"; fi
   [ -f /etc/systemd/system/allinone-agent.service ] && agent=1
   grep -qs allinone /etc/systemd/system/anytls-server.service && at=1
   [ -f /etc/systemd/system/ssmanager.service ] && grep -qs allinone /etc/systemd/system/ssmanager.service && ss=1
@@ -1509,19 +1528,25 @@ uninstall() {
       rm -rf "$PANEL_DIR/allinone" "$PANEL_DIR/.env"
       info "panel removed. Database kept at $PANEL_DIR/data, certificates in $CERT_DIR (delete them manually if not needed)";;
     node)
-      systemctl disable --now allinone-agent hy2mgr-node-sync.timer hysteria-server anytls-server ssmanager 2>/dev/null || true
+      local hy_units="hysteria-server" hy_files=(/etc/systemd/system/hysteria-server.service "$HY_BIN" /etc/sysctl.d/99-hysteria.conf)
+      if hy_is_foreign; then
+        info "keeping the existing Hysteria2 (not managed by allinone)"
+        hy_units=""; hy_files=()
+      fi
+      # shellcheck disable=SC2086
+      systemctl disable --now allinone-agent hy2mgr-node-sync.timer $hy_units anytls-server ssmanager 2>/dev/null || true
       for t in iptables ip6tables; do   # port hopping NAT rules
         command -v "$t" >/dev/null || continue
         "$t" -w -t nat -D PREROUTING -j HY2MGR_HOP 2>/dev/null || true
         "$t" -w -t nat -F HY2MGR_HOP 2>/dev/null || true
         "$t" -w -t nat -X HY2MGR_HOP 2>/dev/null || true
       done
-      rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hy2mgr-node-sync.* \
-            /usr/local/bin/hy2mgr-node-sync "$HY_BIN" /etc/sysctl.d/99-hysteria.conf \
+      rm -f ${hy_files[@]+"${hy_files[@]}"} /etc/systemd/system/hy2mgr-node-sync.* /usr/local/bin/hy2mgr-node-sync \
             /etc/systemd/system/allinone-agent.service "$AGENT_BIN" "$AGENT_CONF" \
             /etc/systemd/system/anytls-server.service "$AT_BIN" \
             /etc/systemd/system/ssmanager.service "$SS_BIN_DIR/ssmanager" "$SS_BIN_DIR/ssserver"
-      rm -rf "$HY_CONF_DIR" "$HY_DATA_DIR" /var/lib/allinone-agent
+      [ ${#hy_files[@]} -eq 0 ] || rm -rf "$HY_CONF_DIR" "$HY_DATA_DIR"
+      rm -rf /var/lib/allinone-agent
       info "node services removed (anytls database kept in $AT_DATA_DIR). Delete the nodes in the panel as well.";;
     *) die "usage: install.sh uninstall panel|node";;
   esac

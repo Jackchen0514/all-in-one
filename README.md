@@ -52,6 +52,8 @@ Cloudflare API Token 权限：**Zone · Zone · Read** + **Zone · DNS · Edit**
 
 安装前会逐个检查端口：被其他程序占用时会提示占用的进程 / systemd 服务，并**让你输入另一个端口**（非交互执行时直接退出并提示用哪个参数改）。重复执行时未指定的端口保持原值。SS 用户端口范围内如果有其他程序在监听，安装结束前会给出警告。
 
+**机器上已有其他 Hysteria2 时**：官方脚本（`get.hy2.sh`）装的 Hysteria2 和 allinone 用的是同一套路径（`/etc/hysteria/config.yaml`、`hysteria-server.service`）。只要配置里没有面板认证回调（`/hy2/auth/`），就不是 allinone 管理的：安装 hysteria2 时会拒绝并退出，`update` 和 `uninstall node` 也不会碰它。可以用 `--type anytls,ss` 跳过 hysteria2 与它共存；或者加 `--hy-takeover` 接管它（先把原 config.yaml 备份为 `config.yaml.bak-<时间>`，原来的用户会失效）。其他面板（3x-ui、sing-box 等）用自己的服务名运行，只要端口不同就能共存，端口冲突时安装脚本会提示换端口。
+
 本机 ufw / firewalld 会自动放行（SS 端口由 agent 在下发时放行），**云服务器安全组需要自己放行**，安装结束会打印需要放行的列表。
 
 ## 一键更新
