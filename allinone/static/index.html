@@ -421,7 +421,7 @@ $("#nBody").onclick = async e => {
 function agentStatus(n) {
   if (n.type !== "hysteria2") {
     if (!n.agent_seen_at) return '<span class="muted" title="节点上的 allinone-agent 还没有连上面板">agent 未连接</span>';
-    return `<span class="tag ${n.agent_synced ? "s-active" : "s-expired"}">${n.agent_synced ? "agent 在线" : "agent 离线"}</span><div class="muted">${n.agent_version ? "v" + esc(n.agent_version) + " · " : ""}${rel(n.agent_seen_at)}</div>`;
+    return `<span class="tag ${n.agent_synced ? "s-active" : "s-expired"}">${n.agent_synced ? "agent 在线" : "agent 离线"}</span><div class="muted">${n.agent_version ? "v" + esc(n.agent_version) + " · " : ""}${rel(n.agent_seen_at)}</div>${n.port_pending ? `<span class="tag s-overlimit" title="agent 会自动修改 anytls-server 的监听端口并重启；失败原因见节点错误">端口待应用</span><div class="muted">节点当前端口 ${esc(n.agent_port)}</div>` : ""}`;
   }
   if (!n.agent_seen_at) return '<span class="muted" title="节点未安装 hy2mgr-node-sync，修改端口/混淆需手动改 config.yaml">未安装同步</span>';
   const stale = Date.now() / 1000 - n.agent_seen_at > 300;

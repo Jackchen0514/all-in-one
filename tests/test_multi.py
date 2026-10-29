@@ -183,6 +183,8 @@ class MultiTest(test_api.APITest):
         return data.decode() if fmt else base64.b64decode(data).decode().splitlines()
 
     def write_agent_config(self, nodes):
+        for n in nodes:  # never touch this machine's real anytls-server unit
+            n.setdefault("unit", os.path.join(self.tmp, "anytls-server.service"))
         path = os.path.join(self.tmp, "agent.json")
         with open(path, "w") as f:
             json.dump({"panel": self.base, "interval": 30, "nodes": nodes}, f)
@@ -514,6 +516,68 @@ class MultiTest(test_api.APITest):
         self.assertEqual(sorted(x["name"] for x in fake.groups.values()), sorted(["manual", "aio-%d Dead" % bad["id"]]))
         self.assertEqual(fake.by_name("amy")["outbound_group_id"], 0)
         self.assertEqual(fake.by_name("bob")["outbound_group_id"], names["aio-%d Dead" % bad["id"]]["id"])
+
+    def test_agent_anytls_listen_port(self):
+        fake = FakeAnyTLS()
+        self.addCleanup(fake.close)
+        unit = os.path.join(self.tmp, "at.service")
+        orig = ("[Unit]\nDescription=AnyTLS Server (managed by allinone-agent)\n[Service]\n"
+                "ExecStart=/usr/local/bin/anytls-server -l 0.0.0.0:9443 -p x -api-listen 127.0.0.1:8843\n")
+        with open(unit, "w") as f:
+            f.write(orig)
+        restarts, fw, up = [], [], [True]
+        busy = set()
+        patches = {"_restart": lambda drv: restarts.append(open(unit).read()) or up[0]}
+        for k, v in patches.items():
+            old = getattr(allinone_agent.AnyTLS, k)
+            setattr(allinone_agent.AnyTLS, k, v)
+            self.addCleanup(setattr, allinone_agent.AnyTLS, k, old)
+        for k, v in {"open_firewall": lambda p, protos=("tcp", "udp"): fw.append((p, protos)),
+                     "port_free": lambda p: p not in busy}.items():
+            old = getattr(allinone_agent, k)
+            setattr(allinone_agent, k, v)
+            self.addCleanup(setattr, allinone_agent, k, old)
+        n = self.node(name="AT", type="anytls", address="a", port="9443")
+        agent = self.write_agent_config([{"token": n["auth_token"], "type": "anytls", "api": fake.url,
+                                          "api_key": "k", "unit": unit}])
+        node = lambda: self.call("GET", "/api/v1/nodes/%d" % n["id"])[1]
+        self.assertTrue(agent.run_once()[0])
+        self.assertEqual(restarts, [])
+        agent.run_once()
+        self.assertEqual((node()["agent_port"], node()["port_pending"]), ("9443", False))
+        # port changed in the panel -> unit rewritten, firewall opened, restarted
+        self.call("PATCH", "/api/v1/nodes/%d" % n["id"], {"port": "10443"})
+        self.assertTrue(node()["port_pending"])
+        self.assertTrue(agent.run_once()[0])
+        self.assertEqual(open(unit).read(), orig.replace("0.0.0.0:9443", "0.0.0.0:10443"))
+        self.assertEqual((len(restarts), fw), (1, [(10443, ("tcp",))]))
+        agent.run_once()
+        self.assertEqual((node()["agent_port"], node()["port_pending"]), ("10443", False))
+        # busy port: nothing touched, error reported
+        busy.add(11443)
+        self.call("PATCH", "/api/v1/nodes/%d" % n["id"], {"port": "11443"})
+        self.assertFalse(agent.run_once()[0])
+        self.assertEqual(len(restarts), 1)
+        agent.run_once()
+        self.assertIn("already in use", node()["last_error"])
+        self.assertTrue(node()["port_pending"])
+        # server does not come back -> rolled back, not retried every cycle
+        busy.clear()
+        up[0] = False
+        self.call("PATCH", "/api/v1/nodes/%d" % n["id"], {"port": "12443"})
+        self.assertFalse(agent.run_once()[0])
+        self.assertIn("0.0.0.0:10443", open(unit).read())
+        self.assertEqual(len(restarts), 3)  # try + rollback
+        agent.run_once()
+        self.assertEqual(len(restarts), 3)
+        self.assertIn("did not start on port 12443", node()["last_error"])
+        # a unit not written by install.sh is never edited
+        up[0] = True
+        with open(unit, "w") as f:
+            f.write(orig.replace(" (managed by allinone-agent)", ""))
+        self.call("PATCH", "/api/v1/nodes/%d" % n["id"], {"port": "13443"})
+        self.assertTrue(agent.run_once()[0])
+        self.assertEqual(len(restarts), 3)
 
     def test_agent_anytls_too_old_for_groups(self):
         fake = FakeAnyTLS()  # no /api/outbound-groups

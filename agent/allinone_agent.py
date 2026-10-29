@@ -35,7 +35,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 STATE_DIR = os.environ.get("AIO_AGENT_STATE_DIR", "/var/lib/allinone-agent")
 BLOCKED_UNTIL = "2000-01-01T00:00:00Z"  # anytls expiry used to block an inactive user
 GROUP_RE = re.compile(r"^aio-(\d+) ")     # anytls outbound groups managed by the agent
@@ -46,6 +46,18 @@ log = logging.getLogger("allinone-agent")
 
 class AgentError(Exception):
     pass
+
+
+def port_free(port):
+    """True when nothing listens on TCP `port` (anytls listens on 0.0.0.0)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("0.0.0.0", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 def http_json(method, url, body=None, headers=None, insecure=False, timeout=15):
@@ -76,17 +88,17 @@ def http_json(method, url, body=None, headers=None, insecure=False, timeout=15):
         raise AgentError("invalid JSON from %s" % url)
 
 
-def open_firewall(port):
-    """Best effort: allow a new shadowsocks port (TCP + UDP) in an active ufw / firewalld.
+def open_firewall(port, protos=("tcp", "udp")):
+    """Best effort: allow a new port in an active ufw / firewalld.
     Cloud security groups are outside our reach."""
     def ok(cmd):
         return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     try:
         if shutil.which("ufw") and b"Status: active" in subprocess.run(["ufw", "status"], stdout=subprocess.PIPE).stdout:
-            for proto in ("tcp", "udp"):
+            for proto in protos:
                 ok(["ufw", "allow", "%d/%s" % (port, proto)])
         elif shutil.which("firewall-cmd") and ok(["firewall-cmd", "--state"]):
-            for proto in ("tcp", "udp"):
+            for proto in protos:
                 ok(["firewall-cmd", "--permanent", "--add-port=%d/%s" % (port, proto)])
             ok(["firewall-cmd", "--reload"])
     except OSError:
@@ -100,10 +112,12 @@ class AnyTLS:
     neutral; IP / connection limits set by hand on the server are left alone."""
 
     NEUTRAL = {"traffic_limit_bytes": 0, "traffic_multiplier": 1.0, "traffic_reset_cycle": "none"}
+    UNIT_MARK = "managed by allinone-agent"  # only a unit written by install.sh is edited
 
     def __init__(self, cfg, memo=None):
         self.api = cfg.get("api", "https://127.0.0.1:8843").rstrip("/")
         self.key = cfg.get("api_key", "")
+        self.unit = cfg.get("unit", "/etc/systemd/system/anytls-server.service")
         # kept across cycles by Agent: {"tests": {panel group id: result}, "no_test": bool}
         self.memo = memo if memo is not None else {}
 
@@ -181,6 +195,64 @@ class AnyTLS:
             tests[w["id"]] = {"ok": bool(r.get("success")), "latency_ms": int(r.get("latency_ms") or 0),
                               "error": str(r.get("error") or "")[:300], "at": t, "url": w["socks5_url"]}
 
+    # ---- listen port (the node's port in the panel) ----
+    LISTEN_RE = re.compile(r"(?m)^(ExecStart=.*\s-l\s+\S*:)(\d+)(?=\s|$)")
+
+    def _read_unit(self):
+        try:
+            with open(self.unit) as f:
+                text = f.read()
+        except OSError:
+            return None, None
+        m = self.LISTEN_RE.search(text)
+        return text, (int(m.group(2)) if m and self.UNIT_MARK in text else None)
+
+    def listen_port(self):
+        """Port anytls-server is configured to listen on, None if the unit is not ours."""
+        return self._read_unit()[1]
+
+    def _restart(self):
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        subprocess.run(["systemctl", "restart", "anytls-server"], check=False)
+        for _ in range(10):
+            time.sleep(1)
+            if subprocess.run(["systemctl", "is-active", "-q", "anytls-server"]).returncode == 0:
+                try:
+                    self._call("GET", "/api/users")
+                    return True
+                except AgentError:
+                    pass
+        return False
+
+    def apply_port(self, want):
+        """Moves anytls-server to the panel's port: rewrites -l in its unit and restarts it.
+        A busy port or a server that does not come back is rolled back and reported."""
+        try:
+            want = int(want)
+        except (TypeError, ValueError):
+            return 0
+        text, have = self._read_unit()
+        if have is None or want == have or not 0 < want < 65536:
+            self.memo.pop("port_failed", None)
+            return 0
+        if self.memo.get("port_failed") == want:  # don't restart anytls every cycle; retried on agent restart
+            raise AgentError("anytls-server did not start on port %d earlier, kept port %d" % (want, have))
+        if not port_free(want):
+            raise AgentError("cannot move anytls-server to port %d: it is already in use on this server" % want)
+        new = self.LISTEN_RE.sub(lambda m: m.group(1) + str(want), text, count=1)
+        with open(self.unit, "w") as f:
+            f.write(new)
+        open_firewall(want, ("tcp",))
+        if self._restart():
+            log.info("anytls-server now listens on port %d (was %d)", want, have)
+            return 1
+        with open(self.unit, "w") as f:
+            f.write(text)
+        self._restart()
+        self.memo["port_failed"] = want
+        raise AgentError("anytls-server did not start on port %d, kept port %d (journalctl -u anytls-server)"
+                         % (want, have))
+
     def results(self):
         return {str(gid): {k: v for k, v in res.items() if k != "url"}
                 for gid, res in self.memo.get("tests", {}).items()}
@@ -222,6 +294,7 @@ class AnyTLS:
             changed += 1
         if gmap:
             self.test_groups(want_groups, gmap)
+        changed += self.apply_port(state.get("listen_port"))
         return changed
 
 
@@ -364,6 +437,8 @@ class Agent:
             report["error"] = report["error"] or str(e)
         if hasattr(drv, "results"):
             report["outbounds"] = drv.results()
+        if hasattr(drv, "listen_port"):
+            report["port"] = drv.listen_port()
         http_json("POST", base + "/report", report)
         state = http_json("GET", base + "/state")
         if state.get("type") != node["type"]:

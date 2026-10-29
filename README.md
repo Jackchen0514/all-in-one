@@ -82,6 +82,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/all-in-one/main
 - **Hysteria2**：与 hysteria-manager 完全一样——连接时回调面板认证，面板每 `AIO_SYNC_INTERVAL` 秒拉取流量并踢掉不合规的在线用户，禁用 / 删除 / 改密码时立即踢下线
 - **AnyTLS / Shadowsocks**：`allinone-agent` 每 30 秒一轮——先上报每个用户的累计流量计数，再拉取应有状态并下发：
   - anytls：创建 / 更新 / 删除用户；不合规（过期、超额、禁用）的用户在 anytls 上被禁用并设为已过期，已建立的会话也会断开；anytls 自身的限额 / 倍数 / 重置被置为中性值，统一由面板计算
+  - anytls 端口：在面板改了 AnyTLS 节点的端口后，agent 会改写 `anytls-server.service` 的 `-l` 监听端口、放行本机防火墙（ufw / firewalld）并重启 anytls-server（agent ≥ 0.3.0）。新端口被占用或重启失败会回滚到原端口，原因显示在节点的错误信息里；节点列表在应用前显示「端口待应用」。云服务器安全组需自行放行新端口
   - ss：合规用户的端口 `add`，不合规用户的端口 `remove`（连接随之断开）；ssmanager 重启后丢失的端口会自动补回
   - 生效延迟最多一个 agent 周期（约 30 秒）
 - **流量**：同一用户三种协议共用一个流量池和限额。hysteria2 区分上传 / 下载；anytls 和 ss 只提供合计流量，记为下载。计入的流量 = 实际流量 × **用户流量倍数** × **节点流量倍数**（节点倍数默认 1，可在节点设置里为高级 / 低价节点单独调整，0 表示该节点不计流量）。节点第一次上报只记录基线，接管旧服务器时不会把历史流量重复计费
@@ -176,7 +177,7 @@ Docker：`docker build -t allinone . && docker run -d -p 8080:8080 -v /opt/allin
 
 **节点字段**：`type`（`hysteria2` / `anytls` / `shadowsocks`，默认 `hysteria2`）、`name`、`address`、`port`（hysteria2：监听端口；anytls：单个 TCP 端口；shadowsocks：忽略）、`ss_method`（`aes-256-gcm` / `aes-128-gcm` / `chacha20-ietf-poly1305`）、`traffic_multiplier`（节点流量倍数 0-100，默认 1）、`sni`、`insecure`、`enabled`、`sort`；仅 hysteria2：`hop_ports`、`hop_interval`、`obfs_password`、`api_url`、`api_secret`。
 
-**agent 接口**（以节点 token 鉴权，供 `allinone-agent` 使用）：`GET /agent/{token}/state`、`POST /agent/{token}/report` `{"counters": {"用户名": 累计字节}, "online": n, "error": "", "version": ""}`。
+**agent 接口**（以节点 token 鉴权，供 `allinone-agent` 使用）：`GET /agent/{token}/state`、`POST /agent/{token}/report` `{"counters": {"用户名": 累计字节}, "online": n, "error": "", "version": "", "port": anytls 当前监听端口}`。
 
 ```bash
 TOKEN=你的API_TOKEN; P=https://panel.example.com/api/v1

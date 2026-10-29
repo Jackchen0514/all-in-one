@@ -353,6 +353,7 @@ class Service:
                              "outbound_group_id": u["outbound_group_id"]} for u in users]
             out["outbound_groups"] = [{"id": g["id"], "name": g["name"], "socks5_url": g["socks5_url"]}
                                       for g in self.db.list_groups()]
+            out["listen_port"] = self._split_port(node["port"])[0]
         elif node["type"] == "shadowsocks":
             out["method"] = node["ss_method"]
             out["ports"] = [{"port": u["ss_port"], "password": u["password"], "username": u["username"]}
@@ -403,7 +404,8 @@ class Service:
         self._store_outbound_results(node, body.get("outbounds"), t)
         self.db.update_node(node["id"], {"last_sync_at": t, "agent_seen_at": t, "online": online,
                                          "last_error": str(body.get("error") or "")[:500],
-                                         "agent_version": str(body.get("version") or "")[:40]})
+                                         "agent_version": str(body.get("version") or "")[:40],
+                                         "agent_port": str(body.get("port") or "")[:10]})
         return {"ok": True, "users": users, "baseline": first}
 
     def _store_outbound_results(self, node, results, t):

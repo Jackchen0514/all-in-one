@@ -456,6 +456,8 @@ def present_node(n):
     if n["type"] in AGENT_TYPES:
         # allinone-agent reports every ~30s; treat it as synced while it keeps reporting.
         n["agent_synced"] = n["agent_seen_at"] > now() - 180
+        # anytls: the agent reports the port anytls-server listens on (agent >= 0.3.0)
+        n["port_pending"] = n["type"] == "anytls" and n["agent_port"] not in ("", str(n["port"]))
     else:
         # Whether the node sync agent has applied the current port / obfs settings.
         listen_port = str(Service._split_port(n["port"])[0])
