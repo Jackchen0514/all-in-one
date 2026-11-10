@@ -377,7 +377,7 @@ class Shadowsocks:
         return counters, online
 
     def apply(self, state):
-        method = state.get("method") or "aes-256-gcm"
+        method = state.get("method") or "2022-blake3-aes-256-gcm"
         want = {int(p["port"]): {"password": p["password"], "method": method, "username": p["username"]}
                 for p in state.get("ports", [])}
         applied = self.load()

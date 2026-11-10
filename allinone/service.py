@@ -16,19 +16,16 @@ from .db import DB, NODE_TYPES, gen_token, now
 log = logging.getLogger("allinone")
 
 GB = 1024 ** 3
-# Shadowsocks ciphers. The SIP022 (2022-blake3-*) ones need a base64 key of a fixed size instead of
+# Shadowsocks ciphers: SIP022 (2022-blake3-*) only. They need a base64 key of a fixed size instead of
 # a password: see ss_key().
-SS_METHODS = ("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305",
-              "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305")
+SS_METHODS = ("2022-blake3-aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-chacha20-poly1305")
+SS_DEFAULT = SS_METHODS[0]
 
 
 def ss_key(method, password):
-    """What a user puts in the password field of `method`. Classic ciphers take the panel password
-    as is. A 2022 cipher needs base64 of exactly 16 (aes-128) / 32 bytes: a password that already is
-    such a key (e.g. imported from an ssmanager 2022 port) is kept, any other is turned into one
-    (sha256), so it still follows password changes."""
-    if not method.startswith("2022-"):
-        return password
+    """What a user puts in the password field of `method`: base64 of exactly 16 (aes-128) / 32 bytes.
+    A password that already is such a key (e.g. imported from an ssmanager 2022 port) is kept, any
+    other is turned into one (sha256), so it still follows password changes."""
     size = 16 if "aes-128" in method else 32
     try:
         if len(base64.b64decode(password, validate=True)) == size:
@@ -546,12 +543,8 @@ class Service:
             if not u["ss_port"]:
                 return None
             key = ss_key(node["ss_method"], u["password"])
-            if node["ss_method"].startswith("2022-"):
-                # SIP022: userinfo is percent-encoded "method:key", never base64
-                info = "%s:%s" % (node["ss_method"], urllib.parse.quote(key, safe=""))
-            else:
-                # SIP002: userinfo = base64url("method:password") without padding
-                info = base64.urlsafe_b64encode(("%s:%s" % (node["ss_method"], key)).encode()).decode().rstrip("=")
+            # SIP022: userinfo is percent-encoded "method:key", never base64
+            info = "%s:%s" % (node["ss_method"], urllib.parse.quote(key, safe=""))
             return "ss://%s@%s:%d#%s" % (info, host, u["ss_port"], tag)
         q = {}
         if node["sni"]:

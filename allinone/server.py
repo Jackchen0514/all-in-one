@@ -255,10 +255,10 @@ def api_user_create(h, svc, m, body):
 def api_user_get(h, svc, m, body):
     u = svc.present_user(_get_user(svc, m["name"]))
     u["links"] = svc.links(u)
-    # SS2022 nodes use a key derived from the password
+    # shadowsocks (SS2022) nodes use a key derived from the password
     u["ss_keys"] = [{"node": n["name"], "method": n["ss_method"], "key": ss_key(n["ss_method"], u["password"])}
                     for n in svc.db.list_nodes(enabled_only=True)
-                    if n["type"] == "shadowsocks" and n["ss_method"].startswith("2022-")]
+                    if n["type"] == "shadowsocks"]
     return u
 
 

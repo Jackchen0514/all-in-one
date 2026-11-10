@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from agent import allinone_agent
 from allinone.config import Config
 from allinone.db import DB
-from allinone.service import Service
+from allinone.service import Service, ss_key
 from tests import test_api
 
 
@@ -197,8 +197,10 @@ class MultiTest(test_api.APITest):
                                                               "port": "20000-30000"})[0], 400)
         self.assertEqual(self.call("POST", "/api/v1/nodes", {"name": "x", "address": "y", "type": "shadowsocks",
                                                               "ss_method": "rc4-md5"})[0], 400)
+        self.assertEqual(self.call("POST", "/api/v1/nodes", {"name": "x", "address": "y", "type": "shadowsocks",
+                                                              "ss_method": "aes-256-gcm"})[0], 400)  # SS2022 only
         n = self.node(name="SS", address="y", type="shadowsocks", port="abc")  # port is ignored for ss
-        self.assertEqual((n["type"], n["ss_method"]), ("shadowsocks", "aes-256-gcm"))
+        self.assertEqual((n["type"], n["ss_method"]), ("shadowsocks", "2022-blake3-aes-256-gcm"))
         # agent nodes are not polled by the panel and cannot use the hysteria auth callback
         self.assertEqual(self.call("POST", "/api/v1/nodes/%d/sync" % n["id"])[0], 400)
         self.user("zed", password="zedpass1")
@@ -228,32 +230,40 @@ class MultiTest(test_api.APITest):
         svc = Service(Config(db_path=path, admin_pass="pw"), DB(path))
         self.assertEqual(svc.db.get_user("old")["ss_port"], 40000)
 
+    def test_classic_ss_nodes_move_to_ss2022(self):
+        path = os.path.join(self.tmp, "old.db")
+        db = DB(path)
+        for name, m in (("a", "aes-256-gcm"), ("b", "aes-128-gcm"), ("c", "chacha20-ietf-poly1305"),
+                        ("d", "rc4-md5"), ("e", "2022-blake3-aes-128-gcm")):
+            db.x("INSERT INTO nodes(name,type,address,port,ss_method,auth_token,created_at) "
+                 "VALUES(?,'shadowsocks','x','',?,?,0)", (name, m, "t" + name))
+        got = {n["name"]: n["ss_method"] for n in DB(path).list_nodes()}
+        self.assertEqual(got, {"a": "2022-blake3-aes-256-gcm", "b": "2022-blake3-aes-128-gcm",
+                               "c": "2022-blake3-chacha20-poly1305", "d": "2022-blake3-aes-256-gcm",
+                               "e": "2022-blake3-aes-128-gcm"})
+
     def test_mixed_subscription(self):
         self.add_node(name="HY", address="hk.example.com", sni="hk.example.com")
         self.node(name="AT", type="anytls", address="hk.example.com", port="8443", sni="hk.example.com")
-        self.node(name="SS", type="shadowsocks", address="2001:db8::1", ss_method="chacha20-ietf-poly1305")
+        self.node(name="SS", type="shadowsocks", address="2001:db8::1", ss_method="2022-blake3-chacha20-poly1305")
         self.node(name="off", type="anytls", address="x", port="1", enabled=False)
         u = self.user("mix", password="mix pass/1")
         links = self.links(u)
         self.assertEqual(links[0], "hysteria2://mix%20pass%2F1@hk.example.com:443/?sni=hk.example.com#HY")
         self.assertEqual(links[1], "anytls://mix%20pass%2F1@hk.example.com:8443/?sni=hk.example.com#AT")
-        m = re.match(r"^ss://([A-Za-z0-9_-]+)@\[2001:db8::1\]:(\d+)#SS$", links[2])
-        self.assertTrue(m, links[2])
-        info = base64.urlsafe_b64decode(m.group(1) + "=" * (-len(m.group(1)) % 4)).decode()
-        self.assertEqual((info, int(m.group(2))), ("chacha20-ietf-poly1305:mix pass/1", u["ss_port"]))
+        key = urllib.parse.quote(ss_key("2022-blake3-chacha20-poly1305", "mix pass/1"), safe="")
+        self.assertEqual(links[2], "ss://2022-blake3-chacha20-poly1305:%s@[2001:db8::1]:%d#SS" % (key, u["ss_port"]))
         self.assertEqual(len(links), 3)
         clash = self.links(u, "?format=clash")
         self.assertIn("    type: anytls\n    server: \"hk.example.com\"\n    port: 8443\n", clash)
-        self.assertIn("    type: ss\n    server: \"2001:db8::1\"\n    port: %d\n    cipher: chacha20-ietf-poly1305\n"
+        self.assertIn("    type: ss\n    server: \"2001:db8::1\"\n    port: %d\n    cipher: 2022-blake3-chacha20-poly1305\n"
                       % u["ss_port"], clash)
         self.assertIn('proxies: ["HY", "AT", "SS", "DIRECT"]', clash)
         self.call("PATCH", "/api/v1/users/mix", {"enabled": False})
         self.assertEqual(self.links(u), [])
 
     def test_ss2022(self):
-        from allinone.service import ss_key
         key16 = base64.b64encode(b"k" * 16).decode()
-        self.assertEqual(ss_key("aes-256-gcm", "plain pw"), "plain pw")
         self.assertEqual(ss_key("2022-blake3-aes-128-gcm", key16), key16)           # already a key
         self.assertEqual(len(base64.b64decode(ss_key("2022-blake3-aes-256-gcm", key16))), 32)  # wrong size
         self.assertEqual(len(base64.b64decode(ss_key("2022-blake3-chacha20-poly1305", "x y"))), 32)
@@ -353,7 +363,7 @@ class MultiTest(test_api.APITest):
         self.assertTrue(agent.run_once()[0])
         self.assertEqual(sorted(fake.ports), sorted([cyd["ss_port"], dee["ss_port"]]))
         self.assertEqual((fake.ports[cyd["ss_port"]]["password"], fake.ports[cyd["ss_port"]]["method"]),
-                         ("cydpass1", "aes-256-gcm"))
+                         (ss_key("2022-blake3-aes-256-gcm", "cydpass1"), "2022-blake3-aes-256-gcm"))
         fake.traffic[cyd["ss_port"]], fake.traffic[dee["ss_port"]] = 300, 400
         agent.run_once()
         self.assertEqual(self.call("GET", "/api/v1/users/cyd")[1]["download"], 300)
@@ -361,11 +371,11 @@ class MultiTest(test_api.APITest):
         # disabling removes the port; password / method change re-adds it; ssmanager restart is healed
         self.call("PATCH", "/api/v1/users/dee", {"enabled": False})
         self.call("PATCH", "/api/v1/users/cyd", {"password": "cydpass2"})
-        self.call("PATCH", "/api/v1/nodes/%d" % n["id"], {"ss_method": "aes-128-gcm"})
+        self.call("PATCH", "/api/v1/nodes/%d" % n["id"], {"ss_method": "2022-blake3-aes-128-gcm"})
         agent.run_once()
         self.assertEqual(list(fake.ports), [cyd["ss_port"]])
         self.assertEqual((fake.ports[cyd["ss_port"]]["password"], fake.ports[cyd["ss_port"]]["method"]),
-                         ("cydpass2", "aes-128-gcm"))
+                         (ss_key("2022-blake3-aes-128-gcm", "cydpass2"), "2022-blake3-aes-128-gcm"))
         fake.ports.clear()
         fake.traffic.clear()
         fake.log.clear()

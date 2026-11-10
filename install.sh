@@ -109,8 +109,8 @@ Options:
   --anytls-version V  anytls-go release, e.g. v0.0.35 (default latest)
 
   shadowsocks:
-  --ss-method M       aes-256-gcm | aes-128-gcm | chacha20-ietf-poly1305 | 2022-blake3-aes-128-gcm |
-                      2022-blake3-aes-256-gcm | 2022-blake3-chacha20-poly1305 (default aes-256-gcm,
+  --ss-method M       2022-blake3-aes-256-gcm | 2022-blake3-aes-128-gcm | 2022-blake3-chacha20-poly1305
+                      (SS2022 only; default 2022-blake3-aes-256-gcm,
                       or the most used method of an adopted ssmanager panel)
                       Every user has their own port, assigned by the panel (--ss-port-range).
   --ss-manager-port P ssmanager control port, UDP on 127.0.0.1 (default 6100)
@@ -181,6 +181,23 @@ valid_domain() { [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-
 json_get() { python3 -c 'import json,sys; v=json.load(sys.stdin)
 for k in sys.argv[1:]: v=v[k]
 print(v)' "$@"; }
+
+# ss2022_method M -> the SS2022 cipher for M (a classic AEAD cipher maps to its 2022 counterpart)
+ss2022_method() {
+  case "$1" in
+    2022-blake3-aes-256-gcm|2022-blake3-aes-128-gcm|2022-blake3-chacha20-poly1305) echo "$1";;
+    aes-256-gcm) echo 2022-blake3-aes-256-gcm;;
+    aes-128-gcm) echo 2022-blake3-aes-128-gcm;;
+    chacha20-ietf-poly1305) echo 2022-blake3-chacha20-poly1305;;
+    *) die "unsupported --ss-method $1 (SS2022 only: 2022-blake3-aes-256-gcm | 2022-blake3-aes-128-gcm | 2022-blake3-chacha20-poly1305)";;
+  esac
+}
+# a classic cipher (older docs / scripts) is mapped to its 2022 counterpart, anything else fails now
+if [ -n "$SS_METHOD" ]; then
+  _m="$(ss2022_method "$SS_METHOD")" || exit 1
+  [ "$_m" = "$SS_METHOD" ] || warn "Shadowsocks is SS2022 only: --ss-method $SS_METHOD -> $_m"
+  SS_METHOD="$_m"
+fi
 
 need_root() { [ "$(id -u)" = 0 ] || die "please run as root"; }
 
@@ -1274,7 +1291,8 @@ print(max(m, key=m.get) if m else "")')"
     info "[shadowsocks] $adopted; stopping ssmanager-panel"
     systemctl disable --now ssmanager-panel >/dev/null 2>&1 || true
   fi
-  local method="${SS_METHOD:-${import_method:-${cur_method:-aes-256-gcm}}}"
+  local method="${SS_METHOD:-${import_method:-${cur_method:-2022-blake3-aes-256-gcm}}}"
+  method="$(ss2022_method "$method")"
 
   install_ssrust_bin
   id "$SS_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$SS_USER"

@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     type         TEXT NOT NULL DEFAULT 'hysteria2', -- hysteria2 | anytls | shadowsocks
     address      TEXT NOT NULL,                 -- host clients connect to
     port         TEXT NOT NULL DEFAULT '443',   -- hysteria2 / anytls listen port (unused for shadowsocks)
-    ss_method    TEXT NOT NULL DEFAULT 'aes-256-gcm',
+    ss_method    TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm',
     traffic_multiplier REAL NOT NULL DEFAULT 1.0, -- node rate: counted = actual * user multiplier * this
     sni          TEXT NOT NULL DEFAULT '',
     insecure     INTEGER NOT NULL DEFAULT 0,
@@ -109,6 +109,8 @@ NODE_FIELDS = (
     "hop_ports", "hop_interval", "api_url", "api_secret", "enabled", "sort",
 )
 NODE_TYPES = ("hysteria2", "anytls", "shadowsocks")
+SS_UPGRADE = {"aes-128-gcm": "2022-blake3-aes-128-gcm", "aes-256-gcm": "2022-blake3-aes-256-gcm",
+              "chacha20-ietf-poly1305": "2022-blake3-chacha20-poly1305"}
 GROUP_FIELDS = ("name", "socks5_url", "note")
 
 
@@ -152,6 +154,10 @@ class DB:
             if name not in cols:
                 self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, ddl))
         self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ss_port ON users(ss_port) WHERE ss_port>0")
+        # shadowsocks nodes are SS2022 only: move nodes on a classic cipher to its 2022 counterpart
+        for old, new in SS_UPGRADE.items():
+            self.conn.execute("UPDATE nodes SET ss_method=? WHERE ss_method=?", (new, old))
+        self.conn.execute("UPDATE nodes SET ss_method='2022-blake3-aes-256-gcm' WHERE ss_method NOT LIKE '2022-%'")
 
     # ---- low level -------------------------------------------------------
     def q(self, sql, args=()):

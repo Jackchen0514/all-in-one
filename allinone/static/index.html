@@ -157,7 +157,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
     <label>名称</label><input name="name" required>
     <label>连接地址</label><input name="address" required placeholder="域名或 IP">
     <label data-t="hysteria2 anytls">端口</label><input data-t="hysteria2 anytls" name="port" value="443" placeholder="监听端口，如 443">
-    <label data-t="shadowsocks">加密方式</label><select data-t="shadowsocks" name="ss_method"><option>aes-256-gcm</option><option>aes-128-gcm</option><option>chacha20-ietf-poly1305</option><option>2022-blake3-aes-128-gcm</option><option>2022-blake3-aes-256-gcm</option><option>2022-blake3-chacha20-poly1305</option></select>
+    <label data-t="shadowsocks">加密方式</label><select data-t="shadowsocks" name="ss_method"><option>2022-blake3-aes-256-gcm</option><option>2022-blake3-aes-128-gcm</option><option>2022-blake3-chacha20-poly1305</option></select>
     <label>流量倍数</label><input name="traffic_multiplier" type="number" min="0" max="100" step="0.1" value="1" title="该节点的流量倍率：计入的流量 = 实际流量 × 用户倍数 × 节点倍数，0 = 该节点不计流量">
     <label data-t="hysteria2">端口跳跃</label><input data-t="hysteria2" name="hop_ports" placeholder="如 20000-30000，留空关闭" title="节点会用 iptables 把这段 UDP 端口转发到监听端口；云服务器安全组需放行这段端口">
     <label data-t="hysteria2">跳跃间隔 (秒)</label><input data-t="hysteria2" name="hop_interval" type="number" min="5" max="3600" value="30">

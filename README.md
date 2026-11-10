@@ -27,7 +27,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/all-in-one/main
 bash <(curl -fsSL https://raw.githubusercontent.com/Jackchen0514/all-in-one/main/install.sh) node \
      --domain jp.example.com --cf-token <CF_TOKEN> --email you@mail.com \
      --panel https://panel.example.com --api-token <面板 API Token> --name 日本 \
-     [--type hysteria2,anytls,ss] [--obfs] [--hop 20000-30000] [--anytls-port 443] [--ss-method aes-256-gcm]
+     [--type hysteria2,anytls,ss] [--obfs] [--hop 20000-30000] [--anytls-port 443] [--ss-method 2022-blake3-aes-256-gcm]
 
 # 指定端口（任意组合，未指定的用默认值）
 bash install.sh all --domain panel.example.com --node-domain hk.example.com --cf-token <CF_TOKEN> --email you@mail.com \
@@ -175,7 +175,7 @@ Docker：`docker build -t allinone . && docker run -d -p 8080:8080 -v /opt/allin
 
 **用户新增字段**：`ss_port`（1-65535，创建时不传则自动分配，冲突返回 409）、`outbound_group_id`（出口分组 id，`0` = 直连，不存在的 id 返回 400）。创建 / 修改用户时也可用 `used_gb` 或 `used`（字节）直接设置已用流量。
 
-**节点字段**：`type`（`hysteria2` / `anytls` / `shadowsocks`，默认 `hysteria2`）、`name`、`address`、`port`（hysteria2：监听端口；anytls：单个 TCP 端口；shadowsocks：忽略）、`ss_method`（`aes-256-gcm` / `aes-128-gcm` / `chacha20-ietf-poly1305` / `2022-blake3-aes-128-gcm` / `2022-blake3-aes-256-gcm` / `2022-blake3-chacha20-poly1305`）、`traffic_multiplier`（节点流量倍数 0-100，默认 1）、`sni`、`insecure`、`enabled`、`sort`；仅 hysteria2：`hop_ports`、`hop_interval`、`obfs_password`、`api_url`、`api_secret`。
+**节点字段**：`type`（`hysteria2` / `anytls` / `shadowsocks`，默认 `hysteria2`）、`name`、`address`、`port`（hysteria2：监听端口；anytls：单个 TCP 端口；shadowsocks：忽略）、`ss_method`（仅 SS2022：`2022-blake3-aes-256-gcm`（默认）/ `2022-blake3-aes-128-gcm` / `2022-blake3-chacha20-poly1305`）、`traffic_multiplier`（节点流量倍数 0-100，默认 1）、`sni`、`insecure`、`enabled`、`sort`；仅 hysteria2：`hop_ports`、`hop_interval`、`obfs_password`、`api_url`、`api_secret`。
 
 **agent 接口**（以节点 token 鉴权，供 `allinone-agent` 使用）：`GET /agent/{token}/state`、`POST /agent/{token}/report` `{"counters": {"用户名": 累计字节}, "online": n, "error": "", "version": "", "port": anytls 当前监听端口}`。
 
@@ -197,7 +197,7 @@ python3 -m unittest discover -s tests -t .
 
 ## 已知限制
 
-- Shadowsocks 一个节点上所有用户使用同一种加密方式。SS2022（`2022-blake3-*`）需要固定长度的 base64 密钥：用户密码本身就是合格密钥（如从 ssmanager 的 2022 端口导入）时直接使用，否则由密码 sha256 派生（aes-128 取 16 字节，其余 32 字节），改密码 / 重新生成后密钥随之变化。订阅链接、Clash 配置和用户「订阅」弹窗里给出的是这个密钥。SS2022 要求客户端与服务器时间误差在 30 秒内
+- Shadowsocks 只支持 SS2022，一个节点上所有用户使用同一种加密方式。旧版本建的 aes-256-gcm / aes-128-gcm / chacha20-ietf-poly1305 节点在面板升级时自动改成对应的 2022 加密方式（用户需刷新订阅）；从 ssmanager 导入的经典加密端口同样按对应的 2022 加密方式接管，原客户端配置失效。SS2022（`2022-blake3-*`）需要固定长度的 base64 密钥：用户密码本身就是合格密钥（如从 ssmanager 的 2022 端口导入）时直接使用，否则由密码 sha256 派生（aes-128 取 16 字节，其余 32 字节），改密码 / 重新生成后密钥随之变化。订阅链接、Clash 配置和用户「订阅」弹窗里给出的是这个密钥。SS2022 要求客户端与服务器时间误差在 30 秒内
 - anytls / ss 节点的禁用、过期、超额最多有约 30 秒延迟（一个 agent 周期）；hysteria2 的「立即踢下线」不受影响
 - anytls 的 IP 数 / 连接数限制、屏蔽规则、出口分组仍在 anytls-server 本机管理 API 上配置，面板不覆盖它们
 - 用户被禁用 / 超额后，ss 端口会被移除：最后一次上报到移除之间（< 30 秒）的流量可能不计入
