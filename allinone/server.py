@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import REPO_URL, __version__, commit
 from .db import NODE_TYPES, gen_token, now
-from .service import GB, SS_METHODS, Service, normalize_socks5_url
+from .service import GB, SS_METHODS, Service, normalize_socks5_url, ss_key
 
 log = logging.getLogger("allinone")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -255,6 +255,10 @@ def api_user_create(h, svc, m, body):
 def api_user_get(h, svc, m, body):
     u = svc.present_user(_get_user(svc, m["name"]))
     u["links"] = svc.links(u)
+    # SS2022 nodes use a key derived from the password
+    u["ss_keys"] = [{"node": n["name"], "method": n["ss_method"], "key": ss_key(n["ss_method"], u["password"])}
+                    for n in svc.db.list_nodes(enabled_only=True)
+                    if n["type"] == "shadowsocks" and n["ss_method"].startswith("2022-")]
     return u
 
 

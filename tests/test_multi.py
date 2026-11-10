@@ -196,7 +196,7 @@ class MultiTest(test_api.APITest):
         self.assertEqual(self.call("POST", "/api/v1/nodes", {"name": "x", "address": "y", "type": "anytls",
                                                               "port": "20000-30000"})[0], 400)
         self.assertEqual(self.call("POST", "/api/v1/nodes", {"name": "x", "address": "y", "type": "shadowsocks",
-                                                              "ss_method": "2022-blake3-aes-256-gcm"})[0], 400)
+                                                              "ss_method": "rc4-md5"})[0], 400)
         n = self.node(name="SS", address="y", type="shadowsocks", port="abc")  # port is ignored for ss
         self.assertEqual((n["type"], n["ss_method"]), ("shadowsocks", "aes-256-gcm"))
         # agent nodes are not polled by the panel and cannot use the hysteria auth callback
@@ -249,6 +249,32 @@ class MultiTest(test_api.APITest):
         self.assertIn('proxies: ["HY", "AT", "SS", "DIRECT"]', clash)
         self.call("PATCH", "/api/v1/users/mix", {"enabled": False})
         self.assertEqual(self.links(u), [])
+
+    def test_ss2022(self):
+        from allinone.service import ss_key
+        key16 = base64.b64encode(b"k" * 16).decode()
+        self.assertEqual(ss_key("aes-256-gcm", "plain pw"), "plain pw")
+        self.assertEqual(ss_key("2022-blake3-aes-128-gcm", key16), key16)           # already a key
+        self.assertEqual(len(base64.b64decode(ss_key("2022-blake3-aes-256-gcm", key16))), 32)  # wrong size
+        self.assertEqual(len(base64.b64decode(ss_key("2022-blake3-chacha20-poly1305", "x y"))), 32)
+        self.assertEqual(self.call("POST", "/api/v1/nodes", {"name": "b", "address": "b", "type": "shadowsocks",
+                                                             "ss_method": "2022-blake3-foo"})[0], 400)
+        n = self.node(name="S2", type="shadowsocks", address="s.example", ss_method="2022-blake3-aes-128-gcm")
+        u = self.user("s22", password="s22 pass/1")
+        key = ss_key("2022-blake3-aes-128-gcm", "s22 pass/1")
+        self.assertEqual(len(base64.b64decode(key)), 16)
+        link = self.links(u)[0]
+        self.assertEqual(link, "ss://2022-blake3-aes-128-gcm:%s@s.example:%d#S2"
+                         % (urllib.parse.quote(key, safe=""), u["ss_port"]))
+        clash = self.links(u, "?format=clash")
+        self.assertIn('    cipher: 2022-blake3-aes-128-gcm\n    password: "%s"\n' % key, clash)
+        st = self.call("GET", "/agent/%s/state" % n["auth_token"], token=None)[1]
+        self.assertEqual(st["ports"][0]["password"], key)
+        self.assertEqual(self.call("GET", "/api/v1/users/s22")[1]["ss_keys"],
+                         [{"node": "S2", "method": "2022-blake3-aes-128-gcm", "key": key}])
+        # the key follows password changes
+        self.call("PATCH", "/api/v1/users/s22", {"password": "s22 pass/2"})
+        self.assertNotEqual(self.call("GET", "/agent/%s/state" % n["auth_token"], token=None)[1]["ports"][0]["password"], key)
 
     def test_agent_report_accounting(self):
         n = self.node(name="AT", type="anytls", address="a", port="8443")

@@ -16,8 +16,26 @@ from .db import DB, NODE_TYPES, gen_token, now
 log = logging.getLogger("allinone")
 
 GB = 1024 ** 3
-# Shadowsocks ciphers that accept an arbitrary password (the 2022 ciphers need a fixed-size key).
-SS_METHODS = ("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305")
+# Shadowsocks ciphers. The SIP022 (2022-blake3-*) ones need a base64 key of a fixed size instead of
+# a password: see ss_key().
+SS_METHODS = ("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305",
+              "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305")
+
+
+def ss_key(method, password):
+    """What a user puts in the password field of `method`. Classic ciphers take the panel password
+    as is. A 2022 cipher needs base64 of exactly 16 (aes-128) / 32 bytes: a password that already is
+    such a key (e.g. imported from an ssmanager 2022 port) is kept, any other is turned into one
+    (sha256), so it still follows password changes."""
+    if not method.startswith("2022-"):
+        return password
+    size = 16 if "aes-128" in method else 32
+    try:
+        if len(base64.b64decode(password, validate=True)) == size:
+            return password
+    except ValueError:
+        pass
+    return base64.b64encode(hashlib.sha256(password.encode()).digest()[:size]).decode()
 # Prefix of the outbound groups the agent manages on anytls-server ("aio-<panel id> <name>").
 GROUP_PREFIX = "aio-"
 
@@ -356,7 +374,8 @@ class Service:
             out["listen_port"] = self._split_port(node["port"])[0]
         elif node["type"] == "shadowsocks":
             out["method"] = node["ss_method"]
-            out["ports"] = [{"port": u["ss_port"], "password": u["password"], "username": u["username"]}
+            out["ports"] = [{"port": u["ss_port"], "password": ss_key(node["ss_method"], u["password"]),
+                             "username": u["username"]}
                             for u in users if on and u["ss_port"] and self.user_status(u, t) == "active"]
         return out
 
@@ -526,9 +545,14 @@ class Service:
         if node["type"] == "shadowsocks":
             if not u["ss_port"]:
                 return None
-            # SIP002: userinfo = base64url("method:password") without padding
-            info = base64.urlsafe_b64encode(("%s:%s" % (node["ss_method"], u["password"])).encode())
-            return "ss://%s@%s:%d#%s" % (info.decode().rstrip("="), host, u["ss_port"], tag)
+            key = ss_key(node["ss_method"], u["password"])
+            if node["ss_method"].startswith("2022-"):
+                # SIP022: userinfo is percent-encoded "method:key", never base64
+                info = "%s:%s" % (node["ss_method"], urllib.parse.quote(key, safe=""))
+            else:
+                # SIP002: userinfo = base64url("method:password") without padding
+                info = base64.urlsafe_b64encode(("%s:%s" % (node["ss_method"], key)).encode()).decode().rstrip("=")
+            return "ss://%s@%s:%d#%s" % (info, host, u["ss_port"], tag)
         q = {}
         if node["sni"]:
             q["sni"] = node["sni"]
@@ -568,7 +592,7 @@ class Service:
                       "    server: %s" % s(n["address"])]
             if n["type"] == "shadowsocks":
                 lines += ["    port: %d" % u["ss_port"], "    cipher: %s" % n["ss_method"],
-                          "    password: %s" % s(u["password"]), "    udp: true"]
+                          "    password: %s" % s(ss_key(n["ss_method"], u["password"])), "    udp: true"]
                 continue
             port, ports = self._split_port(n["port"])
             lines.append("    port: %d" % port)

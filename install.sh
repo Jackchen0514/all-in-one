@@ -109,7 +109,8 @@ Options:
   --anytls-version V  anytls-go release, e.g. v0.0.35 (default latest)
 
   shadowsocks:
-  --ss-method M       aes-256-gcm | aes-128-gcm | chacha20-ietf-poly1305 (default aes-256-gcm,
+  --ss-method M       aes-256-gcm | aes-128-gcm | chacha20-ietf-poly1305 | 2022-blake3-aes-128-gcm |
+                      2022-blake3-aes-256-gcm | 2022-blake3-chacha20-poly1305 (default aes-256-gcm,
                       or the most used method of an adopted ssmanager panel)
                       Every user has their own port, assigned by the panel (--ss-port-range).
   --ss-manager-port P ssmanager control port, UDP on 127.0.0.1 (default 6100)
