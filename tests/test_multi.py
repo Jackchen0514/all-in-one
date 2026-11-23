@@ -287,7 +287,7 @@ class MultiTest(test_api.APITest):
         at = self.node(name="AT", type="anytls", address="hk.example.com", port="8443", address_v6="hk6.example.com")
         self.node(name="SS", type="shadowsocks", address="hk.example.com", address_v6="[2001:db8::7]")
         self.node(name="V4", type="anytls", address="jp.example.com", port="443", sni="jp.example.com")
-        for bad in ("not a host", "1.2.3.4", "hk6"):
+        for bad in ("not a host", "1.2.3.4", "hk6", "fe80::1", "fe80::1%eth0", "::1", "::ffff:1.2.3.4"):
             self.assertEqual(self.call("PATCH", "/api/v1/nodes/%d" % at["id"], {"address_v6": bad})[0], 400, bad)
         u = self.user("six", password="sixpass1")
         links = self.links(u)
@@ -303,9 +303,14 @@ class MultiTest(test_api.APITest):
         self.assertEqual(clash.count("ip-version: ipv6"), 3)
         self.assertIn('    sni: "hk.example.com"', clash.split('"AT IPv6"')[1].split("- name")[0])
         self.assertIn('proxies: ["HY", "HY IPv6", "AT", "AT IPv6", "SS", "SS IPv6", "V4", "DIRECT"]', clash)
+        # a node already named "<name> IPv6" does not produce a duplicate Clash proxy name
+        self.node(name="AT IPv6", type="anytls", address="x.example.com", port="1")
+        names = re.findall(r"^  - name: (.+)$", self.links(u, "?format=clash"), re.M)
+        self.assertEqual(len(names), len(set(names)), names)
+        self.assertIn('"AT IPv6 2"', names)
         # clearing it drops the copy
         self.call("PATCH", "/api/v1/nodes/%d" % at["id"], {"address_v6": ""})
-        self.assertNotIn("AT%20IPv6", " ".join(self.links(u)))
+        self.assertNotIn("@hk6.example.com:8443", " ".join(self.links(u)))
 
     def test_ss2022(self):
         key16 = base64.b64encode(b"k" * 16).decode()

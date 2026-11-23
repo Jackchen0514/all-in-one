@@ -150,7 +150,9 @@ def _check_ranges(spec, name):
 def _v6_host(v):
     """A domain name or an IPv6 literal (with or without brackets)."""
     try:
-        return ipaddress.ip_address(v.strip("[]")).version == 6
+        ip = ipaddress.ip_address(v.strip("[]"))  # rejects a zone ("fe80::1%eth0")
+        return ip.version == 6 and not (ip.is_link_local or ip.is_loopback or ip.is_unspecified
+                                        or ip.is_multicast or ip.ipv4_mapped)
     except ValueError:
         return bool(re.match(r"^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$", v))
 

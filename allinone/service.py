@@ -593,7 +593,15 @@ class Service:
     def clash_config(self, u):
         def s(v):
             return '"%s"' % str(v).replace("\\", "\\\\").replace('"', '\\"')
-        nodes = [n for n in self.endpoints() if n["type"] != "shadowsocks" or u["ss_port"]]
+        nodes, seen = [], set()
+        for n in self.endpoints():
+            if n["type"] == "shadowsocks" and not u["ss_port"]:
+                continue
+            name, i = n["name"], 2
+            while name in seen:  # Clash refuses two proxies with the same name
+                name, i = "%s %d" % (n["name"], i), i + 1
+            seen.add(name)
+            nodes.append(dict(n, name=name))
         lines = ["proxies:"]
         for n in nodes:
             lines += ["  - name: %s" % s(n["name"]), "    type: %s" % ("ss" if n["type"] == "shadowsocks" else n["type"]),

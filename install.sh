@@ -63,7 +63,7 @@ DOMAIN=""; NODE_DOMAIN=""; CF_TOKEN="${CF_TOKEN:-}"; EMAIL=""
 PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
 PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0; HOP=""; HOP_SET=0
 TYPES="hysteria2,anytls,ss"; AT_PORT=""; AT_API_PORT=""; SS_METHOD=""; SS_MGR_PORT=""; SS_RANGE=""
-HY_TAKEOVER=0; HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; IPV6=""; IPV6_DOMAIN=""; IPV6_DOMAIN_SET=0; IPV6_MAIN=""; PUBLIC_IP6=""; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
+HY_TAKEOVER=0; HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; IPV6=""; IPV6_DOMAIN=""; IPV6_DOMAIN_SET=0; IPV6_MAIN=""; IPV6_DOMAIN_TOUCH=0; PUBLIC_IP6=""; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
 
 usage() { cat <<'EOF'
 Usage:
@@ -242,12 +242,22 @@ net_conf_get() { [ ! -f "$NET_CONF" ] || sed -n "s/^$1=//p" "$NET_CONF" | head -
 # resolve_ipv6: --ipv6 / --no-ipv6 / --ipv6-domain, else the choice of an earlier install on this
 # machine, else IPv4 only. IPV6_MAIN = the node domain that stays A-only next to IPV6_DOMAIN.
 resolve_ipv6() {
-  local explicit_off=0
+  local explicit_off=0 prev_domain
   [ "$IPV6" = 0 ] && explicit_off=1
-  if [ "$MODE" = panel ] && [ "$IPV6_DOMAIN_SET" = 1 ]; then
-    warn "--ipv6-domain is a node option (install.sh node / all), ignored"; IPV6_DOMAIN_SET=0; IPV6_DOMAIN=""
+  prev_domain="$(net_conf_get IPV6_DOMAIN)"
+  if [ "$MODE" = panel ]; then
+    # the IPv6 domain belongs to the node on this machine: keep it as it is
+    [ "$IPV6_DOMAIN_SET" = 0 ] || warn "--ipv6-domain is a node option (install.sh node / all), ignored"
+    [ -z "$prev_domain" ] || [ "$explicit_off" = 0 ] \
+      || die "the node on this machine uses --ipv6-domain $prev_domain (needs IPv6): run install.sh node --no-ipv6 first"
+    IPV6_DOMAIN_SET=0
   fi
   [ -n "$IPV6" ] || IPV6="$(net_conf_get IPV6)"
+  # register_node sets the panel's address_v6 only when this install decides it (a value set by
+  # hand in the panel survives a plain re-install)
+  if [ "$MODE" != panel ] && { [ "$IPV6_DOMAIN_SET" = 1 ] || [ -n "$prev_domain" ] || [ "$explicit_off" = 1 ]; }; then
+    IPV6_DOMAIN_TOUCH=1
+  fi
   if [ "$IPV6_DOMAIN_SET" = 1 ]; then
     [ "$IPV6_DOMAIN" != none ] || IPV6_DOMAIN=""
     [ -z "$IPV6_DOMAIN" ] || [ "$explicit_off" = 0 ] || die "--ipv6-domain and --no-ipv6 contradict each other"
@@ -340,7 +350,7 @@ setup_cloudflare() {  # setup_cloudflare DOMAIN...
       else
         # an AAAA left from elsewhere sends IPv6 clients to a port nothing listens on / defeats
         # the separate IPv4 and IPv6 entries
-        old6="$(cf get AAAA "$d" | paste -sd ' ' -)"
+        old6="$(cf get AAAA "$d" 2>/dev/null | paste -sd ' ' -)" || old6=""
         if [ -z "$old6" ]; then :
         elif [ "$d" = "$IPV6_MAIN" ]; then
           warn "$d still has an AAAA record ($old6): with --ipv6-domain it should be IPv4 only (IPv6 is $IPV6_DOMAIN). Delete it in Cloudflare"
@@ -367,7 +377,7 @@ setup_ipv6_domain() {
   fi
   local old4; need_public_ip6
   cf upsert AAAA "$IPV6_DOMAIN" "$PUBLIC_IP6"
-  old4="$(cf get A "$IPV6_DOMAIN" | paste -sd ' ' -)"
+  old4="$(cf get A "$IPV6_DOMAIN" 2>/dev/null | paste -sd ' ' -)" || old4=""
   [ -z "$old4" ] || warn "$IPV6_DOMAIN also has an A record ($old4): delete it in Cloudflare so its entries really use IPv6"
 }
 
@@ -714,8 +724,11 @@ for n in json.load(sys.stdin)["items"]:
 
 # register_node ID JSON -> node JSON (creates when ID is empty)
 register_node() {
-  local body; body="$(echo "$2" | ADDR6="$IPV6_DOMAIN" python3 -c 'import json,os,sys
+  local body="$2"
+  if [ "$IPV6_DOMAIN_TOUCH" = 1 ]; then
+    body="$(echo "$body" | ADDR6="$IPV6_DOMAIN" python3 -c 'import json,os,sys
 b = json.load(sys.stdin); b["address_v6"] = os.environ["ADDR6"]; print(json.dumps(b))')"
+  fi
   if [ -n "$1" ]; then panel_api PATCH "/nodes/$1" "$body"; else panel_api POST /nodes "$body"; fi
 }
 
@@ -1204,8 +1217,11 @@ install_anytls_node() {
   if [ -f "$unit" ]; then
     old_listen="$(unit_flag "$unit" -l)"; old_fallback="$(unit_flag "$unit" -fallback)"
   fi
+  local panel_port=""   # on a re-install the panel's port wins (it may have been changed there)
+  IFS=$'\x1f' read -r _ panel_port _ < <(find_node anytls) || true
   if [ -z "$AT_PORT" ]; then
-    if [ -n "$old_listen" ]; then AT_PORT="${old_listen##*:}"
+    if [ -n "$panel_port" ]; then AT_PORT="$panel_port"
+    elif [ -n "$old_listen" ]; then AT_PORT="${old_listen##*:}"
     elif [ "$MODE" = all ] && [ "$PANEL_PORT" = 443 ]; then AT_PORT=8443
     else AT_PORT=443; fi
   fi
@@ -1647,6 +1663,7 @@ uninstall() {
       systemctl disable --now allinone 2>/dev/null || true
       rm -f /etc/systemd/system/allinone.service
       rm -rf "$PANEL_DIR/allinone" "$PANEL_DIR/.env"
+      [ -f "$AGENT_CONF" ] || [ -f "$HY_CONF_DIR/config.yaml" ] || rm -f "$NET_CONF"
       info "panel removed. Database kept at $PANEL_DIR/data, certificates in $CERT_DIR (delete them manually if not needed)";;
     node)
       local hy_units="hysteria-server" hy_files=(/etc/systemd/system/hysteria-server.service "$HY_BIN" /etc/sysctl.d/99-hysteria.conf)
@@ -1668,6 +1685,9 @@ uninstall() {
             /etc/systemd/system/ssmanager.service "$SS_BIN_DIR/ssmanager" "$SS_BIN_DIR/ssserver"
       [ ${#hy_files[@]} -eq 0 ] || rm -rf "$HY_CONF_DIR" "$HY_DATA_DIR"
       rm -rf /var/lib/allinone-agent
+      if [ -f "$PANEL_DIR/.env" ]; then  # the panel stays: keep its IPv6 choice, drop the node's domain
+        [ ! -f "$NET_CONF" ] || sed -i 's/^IPV6_DOMAIN=.*/IPV6_DOMAIN=/; s/^IPV6_MAIN=.*/IPV6_MAIN=/' "$NET_CONF"
+      else rm -f "$NET_CONF"; fi
       info "node services removed (anytls database kept in $AT_DATA_DIR). Delete the nodes in the panel as well.";;
     *) die "usage: install.sh uninstall panel|node";;
   esac
