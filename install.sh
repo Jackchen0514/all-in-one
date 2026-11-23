@@ -33,6 +33,7 @@ CERT_DIR=/etc/allinone/certs      # one directory per domain, shared by the pane
 CERT_GROUP=allinone-cert
 AGENT_BIN=/usr/local/bin/allinone-agent
 AGENT_CONF=/etc/allinone/agent.json
+NET_CONF=/etc/allinone/network.conf   # IPV6=0|1, the --ipv6 choice of this machine
 HY_BIN=/usr/local/bin/hysteria
 HY_CONF_DIR=/etc/hysteria
 HY_DATA_DIR=/var/lib/hysteria
@@ -62,7 +63,7 @@ DOMAIN=""; NODE_DOMAIN=""; CF_TOKEN="${CF_TOKEN:-}"; EMAIL=""
 PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
 PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0; HOP=""; HOP_SET=0
 TYPES="hysteria2,anytls,ss"; AT_PORT=""; AT_API_PORT=""; SS_METHOD=""; SS_MGR_PORT=""; SS_RANGE=""
-HY_TAKEOVER=0; HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
+HY_TAKEOVER=0; HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; IPV6=""; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
 
 usage() { cat <<'EOF'
 Usage:
@@ -119,7 +120,11 @@ Options:
   for a different one (or stops with the option to use when not run interactively).
   Ports that are not given keep their current value on a re-install.
 
-  --no-dns            don't create/update the Cloudflare A record
+  --ipv6              also serve over IPv6: every service listens dual-stack (IPv4 + IPv6) and
+                      the Cloudflare AAAA record is created next to the A record. Needs a
+                      global IPv6 address on this machine.
+  --no-ipv6           IPv4 only (default on a new install; a re-install keeps the current choice)
+  --no-dns            don't create/update the Cloudflare A / AAAA records
   --no-hysteria       update: don't upgrade the hysteria binary
   --no-anytls         update: don't upgrade anytls-server
   --no-ss             update: don't upgrade shadowsocks-rust
@@ -154,6 +159,8 @@ while [ $# -gt 0 ]; do
     --anytls-version) AT_VERSION="$2"; shift 2;;
     --ss-method) SS_METHOD="$2"; shift 2;;
     --no-dns) DNS_RECORD=0; shift;;
+    --ipv6) IPV6=1; shift;;
+    --no-ipv6) IPV6=0; shift;;
     --no-hysteria) UPDATE_HY=0; shift;;
     --no-anytls) UPDATE_AT=0; shift;;
     --no-ss) UPDATE_SS=0; shift;;
@@ -218,8 +225,30 @@ public_ip() {
   curl -fsS4 -m 10 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' \
     || curl -fsS4 -m 10 https://api.ipify.org
 }
+public_ip6() {
+  curl -fsS6 -m 10 'https://[2606:4700:4700::1111]/cdn-cgi/trace' 2>/dev/null | sed -n 's/^ip=//p' \
+    || curl -fsS6 -m 10 https://api6.ipify.org
+}
+# has_ipv6: this machine has a global IPv6 address (scope 00 in /proc/net/if_inet6, not ULA fc00::/7)
+has_ipv6() { awk '$4 == "00" && $1 !~ /^f[cd]/ {f=1} END {exit !f}' /proc/net/if_inet6 2>/dev/null; }
 
-# Cloudflare API helper (python for JSON handling). Usage: cf verify | cf zone DOMAIN | cf upsert DOMAIN IP
+# resolve_ipv6: --ipv6 / --no-ipv6, else the choice of an earlier install on this machine, else off
+resolve_ipv6() {
+  [ -n "$IPV6" ] || [ ! -f "$NET_CONF" ] || IPV6="$(sed -n 's/^IPV6=//p' "$NET_CONF" | head -1)"
+  [ "$IPV6" = 1 ] || IPV6=0
+  if [ "$IPV6" = 1 ] && ! has_ipv6; then
+    die "--ipv6: this machine has no global IPv6 address (check the cloud console / network config), or use --no-ipv6"
+  fi
+  mkdir -p "$(dirname "$NET_CONF")"
+  echo "IPV6=$IPV6" > "$NET_CONF"
+}
+# listen_any -> wildcard listen address: 0.0.0.0 (IPv4 only) or :: (dual-stack, with --ipv6)
+listen_any() { if [ "$IPV6" = 1 ]; then echo "::"; else echo "0.0.0.0"; fi; }
+# listen_on PORT -> host:port form for Go servers (anytls)
+listen_on() { if [ "$IPV6" = 1 ]; then echo "[::]:$1"; else echo "0.0.0.0:$1"; fi; }
+
+# Cloudflare API helper (python for JSON handling).
+# Usage: cf verify | cf zone DOMAIN | cf upsert A|AAAA DOMAIN IP | cf get A|AAAA DOMAIN
 cf() {
   CF_TOKEN="$CF_TOKEN" CF_API="$CF_API" python3 - "$@" <<'PY'
 import json, os, sys, urllib.request, urllib.error
@@ -250,19 +279,23 @@ if cmd == "verify":
         sys.exit("cloudflare: token is not active")
 elif cmd == "zone":
     print(zone(sys.argv[2]))
+elif cmd == "get":
+    rtype, name = sys.argv[2], sys.argv[3]
+    for r in call("GET", "/zones/%s/dns_records?type=%s&name=%s" % (zone(name), rtype, name))["result"]:
+        print(r["content"])
 elif cmd == "upsert":
-    name, ip = sys.argv[2], sys.argv[3]
+    rtype, name, ip = sys.argv[2], sys.argv[3], sys.argv[4]
     zid = zone(name)
-    recs = call("GET", "/zones/%s/dns_records?type=A&name=%s" % (zid, name))["result"]
-    body = {"type": "A", "name": name, "content": ip, "ttl": 1, "proxied": False}
+    recs = call("GET", "/zones/%s/dns_records?type=%s&name=%s" % (zid, rtype, name))["result"]
+    body = {"type": rtype, "name": name, "content": ip, "ttl": 1, "proxied": False}
     if not recs:
         call("POST", "/zones/%s/dns_records" % zid, body)
-        print("created A %s -> %s" % (name, ip))
+        print("created %s %s -> %s" % (rtype, name, ip))
     elif recs[0]["content"] == ip and not recs[0]["proxied"]:
-        print("A %s -> %s already set" % (name, ip))
+        print("%s %s -> %s already set" % (rtype, name, ip))
     else:
         call("PUT", "/zones/%s/dns_records/%s" % (zid, recs[0]["id"]), body)
-        print("updated A %s: %s%s -> %s (DNS only)" % (name, recs[0]["content"],
+        print("updated %s %s: %s%s -> %s (DNS only)" % (rtype, name, recs[0]["content"],
               " (proxied)" if recs[0]["proxied"] else "", ip))
 PY
 }
@@ -272,8 +305,22 @@ setup_cloudflare() {  # setup_cloudflare DOMAIN...
   ask CF_TOKEN "Cloudflare API token" secret
   if [ -z "$CF_DONE" ]; then info "verifying Cloudflare token"; cf verify; CF_DONE=1; fi
   if [ "$DNS_RECORD" = 1 ]; then
-    local ip; ip="$(public_ip)" || die "cannot detect public IPv4 (use --no-dns and set the record yourself)"
-    for d in "$@"; do cf upsert "$d" "$ip"; done
+    local ip ip6="" d old6
+    ip="$(public_ip)" || die "cannot detect public IPv4 (use --no-dns and set the record yourself)"
+    if [ "$IPV6" = 1 ]; then
+      ip6="$(public_ip6)" && [ -n "$ip6" ] \
+        || die "--ipv6: cannot reach the internet over IPv6 (check the cloud security group / routes), or use --no-dns and set the AAAA record yourself"
+    fi
+    for d in "$@"; do
+      cf upsert A "$d" "$ip"
+      if [ -n "$ip6" ]; then cf upsert AAAA "$d" "$ip6"
+      else
+        # an AAAA left from elsewhere sends IPv6 clients to a port nothing listens on
+        old6="$(cf get AAAA "$d" | paste -sd ' ' -)"
+        [ -z "$old6" ] || warn "$d still has an AAAA record ($old6) but this install is IPv4 only:
+       delete it in Cloudflare, or re-run with --ipv6"
+      fi
+    done
   fi
 }
 
@@ -522,6 +569,7 @@ install_panel() {
   ask EMAIL "ACME email"
   install_pkgs curl python3 openssl tar
   python3 -c 'import sys; sys.exit(sys.version_info < (3, 8))' || die "python >= 3.8 required"
+  resolve_ipv6
   fetch_source
   setup_cloudflare "$DOMAIN"
   issue_cert "$DOMAIN" allinone
@@ -554,7 +602,7 @@ install_panel() {
   PANEL_URL="$url"
   umask 077
   cat > "$env" <<EOF
-AIO_HOST=0.0.0.0
+AIO_HOST=$(listen_any)
 AIO_PORT=$PANEL_PORT
 AIO_DB=$db
 AIO_ADMIN_USER=$ADMIN_USER
@@ -641,6 +689,7 @@ install_node() {
     case "$t" in hysteria2|anytls|ss) ;; *) die "unknown --type $t (use hysteria2, anytls, ss)";; esac
   done
   install_pkgs curl python3 tar
+  resolve_ipv6
   setup_cloudflare "$DOMAIN"
 
   info "checking panel API"
@@ -740,7 +789,8 @@ print(json.dumps({"type": "hysteria2", "name": os.environ["NAME"], "address": os
   info "[hysteria2] writing $conf"
   umask 027
   {
-    echo "listen: :$listen_port"
+    # ":port" is dual-stack in Go, "0.0.0.0:port" IPv4 only
+    if [ "$IPV6" = 1 ]; then echo "listen: :$listen_port"; else echo "listen: 0.0.0.0:$listen_port"; fi
     echo
     echo "tls:   # shared acme.sh certificate, renewed by cron (restarts hysteria-server)"
     echo "  cert: $CERT_DIR/$DOMAIN/fullchain.pem"
@@ -989,7 +1039,8 @@ def main():
     error = None
 
     if (new_port, new_obfs) != (port, obfs) and not failed_before(new_port, new_obfs):
-        new = re.sub(r"^listen:.*$", "listen: :" + new_port, text, count=1, flags=re.M)
+        # keep the listen host (0.0.0.0 = IPv4 only, empty = dual-stack), change the port
+        new = re.sub(r"^(listen:\s*\S*?:?)\d+[ \t]*$", lambda m: m.group(1) + new_port, text, count=1, flags=re.M)
         new = OBFS_RE.sub("", new)
         if new_obfs:
             block = "obfs:\n  type: salamander\n  salamander:\n    password: %s\n\n" % json.dumps(new_obfs)
@@ -1168,7 +1219,8 @@ print(json.dumps({"type": "anytls", "name": os.environ["NAME"], "address": os.en
 
   AT_API="127.0.0.1:$AT_API_PORT"
   # -p only bootstraps a user when the database is empty (the agent deletes it on its first run)
-  local cmd="$AT_BIN -l 0.0.0.0:$AT_PORT -p $boot_pw -db $AT_DATA_DIR/anytls.db -api-listen $AT_API -api-key $api_key"
+  local cmd listen; listen="$(listen_on "$AT_PORT")"
+  cmd="$AT_BIN -l $listen -p $boot_pw -db $AT_DATA_DIR/anytls.db -api-listen $AT_API -api-key $api_key"
   cmd="$cmd -cert $CERT_DIR/$DOMAIN/fullchain.pem -key $CERT_DIR/$DOMAIN/key.pem"
   if [ -n "$old_fallback" ]; then cmd="$cmd -fallback $old_fallback"; fi
   cat > "$unit" <<EOF
@@ -1246,7 +1298,7 @@ Wants=network-online.target
 [Service]
 User=$SS_USER
 Group=$SS_USER
-ExecStart=$SS_BIN_DIR/ssmanager --manager-addr $SS_MANAGER -s 0.0.0.0 $1
+ExecStart=$SS_BIN_DIR/ssmanager --manager-addr $SS_MANAGER -s $(listen_any) $1
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
@@ -1598,6 +1650,8 @@ esac
 
 echo
 info "安装完成"
+if [ "$IPV6" = 1 ]; then echo "  IPv6:       已启用（所有服务同时监听 IPv4 + IPv6）"
+else echo "  IPv6:       未启用（仅 IPv4；需要时加 --ipv6 重新执行安装命令）"; fi
 [ -n "$PANEL_SUMMARY" ] && echo "$PANEL_SUMMARY"
 [ -n "$NODE_SUMMARY" ] && echo "$NODE_SUMMARY"
 [ -n "$FIREWALL_HINT" ] && echo "

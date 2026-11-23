@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from agent import allinone_agent
@@ -229,6 +230,25 @@ class MultiTest(test_api.APITest):
         db.x("INSERT INTO users(username,password,sub_token,created_at,updated_at) VALUES('old','oldpass1','s',0,0)")
         svc = Service(Config(db_path=path, admin_pass="pw"), DB(path))
         self.assertEqual(svc.db.get_user("old")["ss_port"], 40000)
+
+    def test_panel_dual_stack(self):
+        from allinone import server
+        if not socket.has_ipv6:
+            self.skipTest("no IPv6")
+        try:
+            srv = server.make_server(self.svc, "::", 0)
+        except OSError as e:
+            self.skipTest("IPv6 disabled: %s" % e)
+        self.addCleanup(srv.server_close)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        port = srv.server_address[1]
+        for host in ("127.0.0.1", "[::1]"):  # IPv4 clients reach an AIO_HOST=:: panel too
+            with urllib.request.urlopen("http://%s:%d/" % (host, port), timeout=5) as r:
+                self.assertEqual(r.status, 200)
+        v4 = server.make_server(self.svc, "0.0.0.0", 0)
+        v4.server_close()
+        self.assertEqual(v4.socket.family, socket.AF_INET)
 
     def test_classic_ss_nodes_move_to_ss2022(self):
         path = os.path.join(self.tmp, "old.db")

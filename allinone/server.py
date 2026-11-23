@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import re
+import socket
 import sqlite3
 import ssl
 import urllib.parse
@@ -704,9 +705,18 @@ class Server(ThreadingHTTPServer):
         log.debug("connection error from %s", client_address, exc_info=True)
 
 
+class Server6(Server):
+    """An IPv6 host (AIO_HOST=::, install.sh --ipv6): dual-stack, IPv4 clients are accepted too."""
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
 def make_server(svc, host, port, tls_cert="", tls_key=""):
     Handler.svc = svc
-    srv = Server((host, port), Handler)
+    srv = (Server6 if ":" in host else Server)((host.strip("[]"), port), Handler)
     srv.daemon_threads = True
     srv.tls = bool(tls_cert and tls_key)
     if srv.tls:

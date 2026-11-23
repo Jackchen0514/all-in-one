@@ -34,6 +34,9 @@ bash install.sh all --domain panel.example.com --node-domain hk.example.com --cf
      --panel-port 8443 --port 8444 --anytls-port 9443 --stats-port 19999 \
      --anytls-api-port 18843 --ss-manager-port 16100 --ss-port-range 50000-59999
 
+# 同时支持 IPv6（默认只用 IPv4）
+bash install.sh all --domain panel.example.com --node-domain hk.example.com --cf-token <CF_TOKEN> --email you@mail.com --ipv6
+
 # 只装面板
 bash install.sh panel --domain panel.example.com --cf-token <CF_TOKEN> --email you@mail.com
 
@@ -49,6 +52,8 @@ Cloudflare API Token 权限：**Zone · Zone · Read** + **Zone · DNS · Edit**
 | Hysteria2 | UDP 443（`--port`）、统计 API TCP 9999（`--stats-port`，只对面板开放） | 与面板共用 `/etc/allinone/certs/<域名>/` |
 | AnyTLS | TCP 443；与面板同机且面板占用 443 时默认 8443（`--anytls-port`）；管理 API 127.0.0.1:8843（`--anytls-api-port`） | 与面板共用 `/etc/allinone/certs/<域名>/` |
 | Shadowsocks | 每个用户一个端口，TCP+UDP，默认 40000-49999（`--ss-port-range`，即面板 `AIO_SS_PORT_RANGE`）；ssmanager 控制端口 UDP 127.0.0.1:6100（`--ss-manager-port`） | 不需要 |
+
+**IPv4 / IPv6**：默认只用 IPv4——各服务监听 `0.0.0.0`，只创建 A 记录。加 `--ipv6` 后所有服务（面板、Hysteria2、AnyTLS、Shadowsocks）改为双栈监听（同时接受 IPv4 和 IPv6，端口不变），并额外创建 / 更新指向本机公网 IPv6 的 AAAA 记录；IPv4 客户端照常可用，有 IPv6 的客户端可以走 IPv6。要求本机有全局 IPv6 地址并能通过 IPv6 访问外网，否则安装直接退出。选择保存在 `/etc/allinone/network.conf`，重复执行安装时不加参数保持原选择，`--no-ipv6` 改回仅 IPv4（此时如果域名上还留着 AAAA 记录会给出警告，需要到 Cloudflare 手动删除）。面板和节点是各自独立的选择。云服务器安全组需同时为 IPv6 放行相同端口。
 
 安装前会逐个检查端口：被其他程序占用时会提示占用的进程 / systemd 服务，并**让你输入另一个端口**（非交互执行时直接退出并提示用哪个参数改）。重复执行时未指定的端口保持原值。SS 用户端口范围内如果有其他程序在监听，安装结束前会给出警告。
 

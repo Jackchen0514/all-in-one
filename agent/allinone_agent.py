@@ -35,7 +35,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 STATE_DIR = os.environ.get("AIO_AGENT_STATE_DIR", "/var/lib/allinone-agent")
 BLOCKED_UNTIL = "2000-01-01T00:00:00Z"  # anytls expiry used to block an inactive user
 GROUP_RE = re.compile(r"^aio-(\d+) ")     # anytls outbound groups managed by the agent
@@ -49,10 +49,16 @@ class AgentError(Exception):
 
 
 def port_free(port):
-    """True when nothing listens on TCP `port` (anytls listens on 0.0.0.0)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    """True when nothing listens on TCP `port`, over IPv4 or IPv6 (anytls listens on 0.0.0.0, or on
+    [::] when installed with --ipv6). A dual-stack bind sees both; IPv4 only without IPv6."""
     try:
-        s.bind(("0.0.0.0", port))
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        addr = ("::", port)
+    except OSError:
+        s, addr = socket.socket(socket.AF_INET, socket.SOCK_STREAM), ("0.0.0.0", port)
+    try:
+        s.bind(addr)
         return True
     except OSError:
         return False
