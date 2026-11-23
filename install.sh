@@ -61,7 +61,7 @@ UNINSTALL_WHAT=""
 if [ "$MODE" = uninstall ]; then UNINSTALL_WHAT="${1:-}"; [ $# -gt 0 ] && shift; fi
 DOMAIN=""; NODE_DOMAIN=""; CF_TOKEN="${CF_TOKEN:-}"; EMAIL=""
 PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
-PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0; HOP=""; HOP_SET=0
+PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; NAME_SET=0; OBFS=""; STATS_PORT=9999; PORT_SET=0; HOP=""; HOP_SET=0
 TYPES="hysteria2,anytls,ss"; AT_PORT=""; AT_API_PORT=""; SS_METHOD=""; SS_MGR_PORT=""; SS_RANGE=""
 HY_TAKEOVER=0; HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; IPV6=""; IPV6_DOMAIN=""; IPV6_DOMAIN_SET=0; IPV6_MAIN=""; IPV6_DOMAIN_TOUCH=0; PUBLIC_IP6=""; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
 
@@ -148,7 +148,7 @@ while [ $# -gt 0 ]; do
     --admin-pass) ADMIN_PASS="$2"; shift 2;;
     --panel) PANEL_URL="${2%/}"; shift 2;;
     --api-token) API_TOKEN="$2"; shift 2;;
-    --name) NODE_NAME="$2"; shift 2;;
+    --name) NODE_NAME="$2"; NAME_SET=1; shift 2;;
     --type|--types) TYPES="$2"; shift 2;;
     --obfs) OBFS=1; shift;;
     --no-obfs) OBFS=0; shift;;
@@ -723,12 +723,18 @@ for n in json.load(sys.stdin)["items"]:
 }
 
 # register_node ID JSON -> node JSON (creates when ID is empty)
+# On a re-install (ID given) what was edited in the panel is kept: name (unless --name), enabled,
+# SNI and insecure; address_v6 only changes when this install decides it (see resolve_ipv6).
 register_node() {
-  local body="$2"
-  if [ "$IPV6_DOMAIN_TOUCH" = 1 ]; then
-    body="$(echo "$body" | ADDR6="$IPV6_DOMAIN" python3 -c 'import json,os,sys
-b = json.load(sys.stdin); b["address_v6"] = os.environ["ADDR6"]; print(json.dumps(b))')"
-  fi
+  local body
+  body="$(echo "$2" | EXISTING="$1" NAME_SET="$NAME_SET" TOUCH="$IPV6_DOMAIN_TOUCH" ADDR6="$IPV6_DOMAIN" python3 -c 'import json,os,sys
+b = json.load(sys.stdin)
+if os.environ["EXISTING"]:
+    for k in ("enabled", "sni", "insecure") + (() if os.environ["NAME_SET"] == "1" else ("name",)):
+        b.pop(k, None)
+if os.environ["TOUCH"] == "1":
+    b["address_v6"] = os.environ["ADDR6"]
+print(json.dumps(b))')"
   if [ -n "$1" ]; then panel_api PATCH "/nodes/$1" "$body"; else panel_api POST /nodes "$body"; fi
 }
 
