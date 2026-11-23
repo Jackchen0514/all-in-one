@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     name         TEXT NOT NULL,
     type         TEXT NOT NULL DEFAULT 'hysteria2', -- hysteria2 | anytls | shadowsocks
     address      TEXT NOT NULL,                 -- host clients connect to
+    address_v6   TEXT NOT NULL DEFAULT '',      -- optional IPv6-only host: a second "<name> IPv6" entry
     port         TEXT NOT NULL DEFAULT '443',   -- hysteria2 / anytls listen port (unused for shadowsocks)
     ss_method    TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm',
     traffic_multiplier REAL NOT NULL DEFAULT 1.0, -- node rate: counted = actual * user multiplier * this
@@ -105,7 +106,7 @@ USER_FIELDS = (
     "upload", "download", "reset_day", "traffic_multiplier", "note", "ss_port", "outbound_group_id",
 )
 NODE_FIELDS = (
-    "name", "type", "address", "port", "ss_method", "traffic_multiplier", "sni", "insecure", "obfs_password",
+    "name", "type", "address", "address_v6", "port", "ss_method", "traffic_multiplier", "sni", "insecure", "obfs_password",
     "hop_ports", "hop_interval", "api_url", "api_secret", "enabled", "sort",
 )
 NODE_TYPES = ("hysteria2", "anytls", "shadowsocks")
@@ -149,7 +150,8 @@ class DB:
                                  ("nodes", "ss_method", "TEXT NOT NULL DEFAULT 'aes-256-gcm'"),
                                  ("nodes", "agent_version", "TEXT NOT NULL DEFAULT ''"),
                                  ("nodes", "traffic_multiplier", "REAL NOT NULL DEFAULT 1.0"),
-                                 ("users", "outbound_group_id", "INTEGER NOT NULL DEFAULT 0")):
+                                 ("users", "outbound_group_id", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("nodes", "address_v6", "TEXT NOT NULL DEFAULT ''")):
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(%s)" % table)}
             if name not in cols:
                 self.conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, ddl))

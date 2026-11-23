@@ -63,7 +63,7 @@ DOMAIN=""; NODE_DOMAIN=""; CF_TOKEN="${CF_TOKEN:-}"; EMAIL=""
 PANEL_PORT=443; NODE_PORT=443; ADMIN_USER="admin"; ADMIN_PASS=""
 PANEL_URL=""; API_TOKEN=""; NODE_NAME=""; OBFS=""; STATS_PORT=9999; PORT_SET=0; HOP=""; HOP_SET=0
 TYPES="hysteria2,anytls,ss"; AT_PORT=""; AT_API_PORT=""; SS_METHOD=""; SS_MGR_PORT=""; SS_RANGE=""
-HY_TAKEOVER=0; HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; IPV6=""; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
+HY_TAKEOVER=0; HY_VERSION=latest; AT_VERSION=latest; DNS_RECORD=1; IPV6=""; IPV6_DOMAIN=""; IPV6_DOMAIN_SET=0; IPV6_MAIN=""; PUBLIC_IP6=""; UPDATE_HY=1; UPDATE_AT=1; UPDATE_SS=1; FORCE=0
 
 usage() { cat <<'EOF'
 Usage:
@@ -124,6 +124,10 @@ Options:
                       the Cloudflare AAAA record is created next to the A record. Needs a
                       global IPv6 address on this machine.
   --no-ipv6           IPv4 only (default on a new install; a re-install keeps the current choice)
+  --ipv6-domain D6    node: a separate IPv6 domain (implies --ipv6). The node domain keeps only its
+                      A record, D6 gets only an AAAA record, and subscriptions list every node of
+                      this server twice: "<name>" over IPv4 and "<name> IPv6" over D6 (same
+                      services, ports and traffic accounting). "--ipv6-domain none" removes it.
   --no-dns            don't create/update the Cloudflare A / AAAA records
   --no-hysteria       update: don't upgrade the hysteria binary
   --no-anytls         update: don't upgrade anytls-server
@@ -161,6 +165,7 @@ while [ $# -gt 0 ]; do
     --no-dns) DNS_RECORD=0; shift;;
     --ipv6) IPV6=1; shift;;
     --no-ipv6) IPV6=0; shift;;
+    --ipv6-domain) IPV6_DOMAIN="$2"; IPV6_DOMAIN_SET=1; shift 2;;
     --no-hysteria) UPDATE_HY=0; shift;;
     --no-anytls) UPDATE_AT=0; shift;;
     --no-ss) UPDATE_SS=0; shift;;
@@ -232,15 +237,37 @@ public_ip6() {
 # has_ipv6: this machine has a global IPv6 address (scope 00 in /proc/net/if_inet6, not ULA fc00::/7)
 has_ipv6() { awk '$4 == "00" && $1 !~ /^f[cd]/ {f=1} END {exit !f}' /proc/net/if_inet6 2>/dev/null; }
 
-# resolve_ipv6: --ipv6 / --no-ipv6, else the choice of an earlier install on this machine, else off
+net_conf_get() { [ ! -f "$NET_CONF" ] || sed -n "s/^$1=//p" "$NET_CONF" | head -1; }
+
+# resolve_ipv6: --ipv6 / --no-ipv6 / --ipv6-domain, else the choice of an earlier install on this
+# machine, else IPv4 only. IPV6_MAIN = the node domain that stays A-only next to IPV6_DOMAIN.
 resolve_ipv6() {
-  [ -n "$IPV6" ] || [ ! -f "$NET_CONF" ] || IPV6="$(sed -n 's/^IPV6=//p' "$NET_CONF" | head -1)"
+  local explicit_off=0
+  [ "$IPV6" = 0 ] && explicit_off=1
+  if [ "$MODE" = panel ] && [ "$IPV6_DOMAIN_SET" = 1 ]; then
+    warn "--ipv6-domain is a node option (install.sh node / all), ignored"; IPV6_DOMAIN_SET=0; IPV6_DOMAIN=""
+  fi
+  [ -n "$IPV6" ] || IPV6="$(net_conf_get IPV6)"
+  if [ "$IPV6_DOMAIN_SET" = 1 ]; then
+    [ "$IPV6_DOMAIN" != none ] || IPV6_DOMAIN=""
+    [ -z "$IPV6_DOMAIN" ] || [ "$explicit_off" = 0 ] || die "--ipv6-domain and --no-ipv6 contradict each other"
+  elif [ "$explicit_off" = 0 ]; then
+    IPV6_DOMAIN="$(net_conf_get IPV6_DOMAIN)"; IPV6_MAIN="$(net_conf_get IPV6_MAIN)"
+  fi
+  if [ -n "$IPV6_DOMAIN" ]; then
+    valid_domain "$IPV6_DOMAIN" || die "invalid --ipv6-domain: $IPV6_DOMAIN"
+    IPV6=1
+    case "$MODE" in all) IPV6_MAIN="$NODE_DOMAIN";; node) IPV6_MAIN="$DOMAIN";; esac
+    [ "$IPV6_DOMAIN" != "$IPV6_MAIN" ] || die "--ipv6-domain must differ from the node domain ($IPV6_MAIN)"
+  else
+    IPV6_MAIN=""
+  fi
   [ "$IPV6" = 1 ] || IPV6=0
   if [ "$IPV6" = 1 ] && ! has_ipv6; then
     die "--ipv6: this machine has no global IPv6 address (check the cloud console / network config), or use --no-ipv6"
   fi
   mkdir -p "$(dirname "$NET_CONF")"
-  echo "IPV6=$IPV6" > "$NET_CONF"
+  printf 'IPV6=%s\nIPV6_DOMAIN=%s\nIPV6_MAIN=%s\n' "$IPV6" "$IPV6_DOMAIN" "$IPV6_MAIN" > "$NET_CONF"
 }
 # listen_any -> wildcard listen address: 0.0.0.0 (IPv4 only) or :: (dual-stack, with --ipv6)
 listen_any() { if [ "$IPV6" = 1 ]; then echo "::"; else echo "0.0.0.0"; fi; }
@@ -305,23 +332,43 @@ setup_cloudflare() {  # setup_cloudflare DOMAIN...
   ask CF_TOKEN "Cloudflare API token" secret
   if [ -z "$CF_DONE" ]; then info "verifying Cloudflare token"; cf verify; CF_DONE=1; fi
   if [ "$DNS_RECORD" = 1 ]; then
-    local ip ip6="" d old6
+    local ip d old6
     ip="$(public_ip)" || die "cannot detect public IPv4 (use --no-dns and set the record yourself)"
-    if [ "$IPV6" = 1 ]; then
-      ip6="$(public_ip6)" && [ -n "$ip6" ] \
-        || die "--ipv6: cannot reach the internet over IPv6 (check the cloud security group / routes), or use --no-dns and set the AAAA record yourself"
-    fi
     for d in "$@"; do
       cf upsert A "$d" "$ip"
-      if [ -n "$ip6" ]; then cf upsert AAAA "$d" "$ip6"
+      if [ "$IPV6" = 1 ] && [ "$d" != "$IPV6_MAIN" ]; then need_public_ip6; cf upsert AAAA "$d" "$PUBLIC_IP6"
       else
-        # an AAAA left from elsewhere sends IPv6 clients to a port nothing listens on
+        # an AAAA left from elsewhere sends IPv6 clients to a port nothing listens on / defeats
+        # the separate IPv4 and IPv6 entries
         old6="$(cf get AAAA "$d" | paste -sd ' ' -)"
-        [ -z "$old6" ] || warn "$d still has an AAAA record ($old6) but this install is IPv4 only:
+        if [ -z "$old6" ]; then :
+        elif [ "$d" = "$IPV6_MAIN" ]; then
+          warn "$d still has an AAAA record ($old6): with --ipv6-domain it should be IPv4 only (IPv6 is $IPV6_DOMAIN). Delete it in Cloudflare"
+        else
+          warn "$d still has an AAAA record ($old6) but this install is IPv4 only:
        delete it in Cloudflare, or re-run with --ipv6"
+        fi
       fi
     done
   fi
+}
+
+need_public_ip6() {  # sets PUBLIC_IP6 (not in a subshell, so die stops the install)
+  [ -n "$PUBLIC_IP6" ] || PUBLIC_IP6="$(public_ip6)" || true
+  [ -n "$PUBLIC_IP6" ] \
+    || die "--ipv6: cannot reach the internet over IPv6 (check the cloud security group / routes), or use --no-dns and set the AAAA record yourself"
+}
+
+# setup_ipv6_domain: AAAA (only) for --ipv6-domain
+setup_ipv6_domain() {
+  [ -n "$IPV6_DOMAIN" ] || return 0
+  if [ "$DNS_RECORD" != 1 ]; then
+    warn "--no-dns: point an AAAA record of $IPV6_DOMAIN to this server yourself (no A record)"; return 0
+  fi
+  local old4; need_public_ip6
+  cf upsert AAAA "$IPV6_DOMAIN" "$PUBLIC_IP6"
+  old4="$(cf get A "$IPV6_DOMAIN" | paste -sd ' ' -)"
+  [ -z "$old4" ] || warn "$IPV6_DOMAIN also has an A record ($old4): delete it in Cloudflare so its entries really use IPv6"
 }
 
 open_port() {  # open_port PORT tcp|udp [from-ip]
@@ -667,7 +714,9 @@ for n in json.load(sys.stdin)["items"]:
 
 # register_node ID JSON -> node JSON (creates when ID is empty)
 register_node() {
-  if [ -n "$1" ]; then panel_api PATCH "/nodes/$1" "$2"; else panel_api POST /nodes "$2"; fi
+  local body; body="$(echo "$2" | ADDR6="$IPV6_DOMAIN" python3 -c 'import json,os,sys
+b = json.load(sys.stdin); b["address_v6"] = os.environ["ADDR6"]; print(json.dumps(b))')"
+  if [ -n "$1" ]; then panel_api PATCH "/nodes/$1" "$body"; else panel_api POST /nodes "$body"; fi
 }
 
 node_name() {  # node_name LABEL
@@ -691,6 +740,7 @@ install_node() {
   install_pkgs curl python3 tar
   resolve_ipv6
   setup_cloudflare "$DOMAIN"
+  setup_ipv6_domain
 
   info "checking panel API"
   panel_api GET /stats >/dev/null || die "cannot reach panel API at $PANEL_URL (check URL / API token)"
@@ -1650,7 +1700,9 @@ esac
 
 echo
 info "安装完成"
-if [ "$IPV6" = 1 ]; then echo "  IPv6:       已启用（所有服务同时监听 IPv4 + IPv6）"
+if [ -n "$IPV6_DOMAIN" ] && [ -n "$NODE_SUMMARY" ]; then
+  echo "  IPv6:       已启用，IPv6 专用域名 $IPV6_DOMAIN（订阅里每个节点多一个「名称 IPv6」，$IPV6_MAIN 只走 IPv4）"
+elif [ "$IPV6" = 1 ]; then echo "  IPv6:       已启用（所有服务同时监听 IPv4 + IPv6）"
 else echo "  IPv6:       未启用（仅 IPv4；需要时加 --ipv6 重新执行安装命令）"; fi
 [ -n "$PANEL_SUMMARY" ] && echo "$PANEL_SUMMARY"
 [ -n "$NODE_SUMMARY" ] && echo "$NODE_SUMMARY"

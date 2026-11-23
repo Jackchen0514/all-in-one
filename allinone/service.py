@@ -566,9 +566,25 @@ class Service:
         return "hysteria2://%s@%s:%s/%s#%s" % (
             pw, host, port, ("?" + urllib.parse.urlencode(q)) if q else "", tag)
 
-    def links(self, u):
+    def endpoints(self):
+        """Enabled nodes as they appear in subscriptions: a node with an IPv6 host (address_v6) is
+        listed twice, the copy named "<name> IPv6". The copy keeps the node's TLS name as SNI, so the
+        certificate of the main domain is valid for it."""
         out = []
         for n in self.db.list_nodes(enabled_only=True):
+            out.append(n)
+            if n["address_v6"]:
+                sni = n["sni"] or ("" if self._is_ip(n["address"]) else n["address"])
+                out.append(dict(n, address=n["address_v6"].strip("[]"), name=n["name"] + " IPv6", sni=sni, v6=True))
+        return out
+
+    @staticmethod
+    def _is_ip(v):
+        return bool(re.match(r"^[\d.]+$", v)) or ":" in v
+
+    def links(self, u):
+        out = []
+        for n in self.endpoints():
             link = self.node_uri(n, u)
             if link:
                 out.append(link)
@@ -577,12 +593,13 @@ class Service:
     def clash_config(self, u):
         def s(v):
             return '"%s"' % str(v).replace("\\", "\\\\").replace('"', '\\"')
-        nodes = [n for n in self.db.list_nodes(enabled_only=True)
-                 if n["type"] != "shadowsocks" or u["ss_port"]]
+        nodes = [n for n in self.endpoints() if n["type"] != "shadowsocks" or u["ss_port"]]
         lines = ["proxies:"]
         for n in nodes:
             lines += ["  - name: %s" % s(n["name"]), "    type: %s" % ("ss" if n["type"] == "shadowsocks" else n["type"]),
                       "    server: %s" % s(n["address"])]
+            if n.get("v6"):  # Mihomo: resolve / connect over IPv6 even when its DNS skips AAAA
+                lines.append("    ip-version: ipv6")
             if n["type"] == "shadowsocks":
                 lines += ["    port: %d" % u["ss_port"], "    cipher: %s" % n["ss_method"],
                           "    password: %s" % s(ss_key(n["ss_method"], u["password"])), "    udp: true"]

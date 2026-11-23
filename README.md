@@ -37,6 +37,9 @@ bash install.sh all --domain panel.example.com --node-domain hk.example.com --cf
 # 同时支持 IPv6（默认只用 IPv4）
 bash install.sh all --domain panel.example.com --node-domain hk.example.com --cf-token <CF_TOKEN> --email you@mail.com --ipv6
 
+# IPv4 和 IPv6 分开：hk 只走 IPv4，hk6 只走 IPv6，订阅里每个节点多一个「名称 IPv6」
+bash install.sh node ... --domain hk.example.com --ipv6-domain hk6.example.com
+
 # 只装面板
 bash install.sh panel --domain panel.example.com --cf-token <CF_TOKEN> --email you@mail.com
 
@@ -54,6 +57,8 @@ Cloudflare API Token 权限：**Zone · Zone · Read** + **Zone · DNS · Edit**
 | Shadowsocks | 每个用户一个端口，TCP+UDP，默认 40000-49999（`--ss-port-range`，即面板 `AIO_SS_PORT_RANGE`）；ssmanager 控制端口 UDP 127.0.0.1:6100（`--ss-manager-port`） | 不需要 |
 
 **IPv4 / IPv6**：默认只用 IPv4——各服务监听 `0.0.0.0`，只创建 A 记录。加 `--ipv6` 后所有服务（面板、Hysteria2、AnyTLS、Shadowsocks）改为双栈监听（同时接受 IPv4 和 IPv6，端口不变），并额外创建 / 更新指向本机公网 IPv6 的 AAAA 记录；IPv4 客户端照常可用，有 IPv6 的客户端可以走 IPv6。要求本机有全局 IPv6 地址并能通过 IPv6 访问外网，否则安装直接退出。选择保存在 `/etc/allinone/network.conf`，重复执行安装时不加参数保持原选择，`--no-ipv6` 改回仅 IPv4（此时如果域名上还留着 AAAA 记录会给出警告，需要到 Cloudflare 手动删除）。面板和节点是各自独立的选择。云服务器安全组需同时为 IPv6 放行相同端口。
+
+**IPv6 用单独的域名（`--ipv6-domain hk6.example.com`，仅节点）**：同一个域名同时有 A 和 AAAA 时，用 IPv4 还是 IPv6 由客户端决定；Hysteria2 走 UDP，客户端的 IPv6 看似可用实际不通时可能直接连不上。加 `--ipv6-domain` 后（自动包含 `--ipv6`）：节点域名只保留 A 记录，IPv6 域名只有 AAAA 记录，本机注册的每个节点都会填上「IPv6 地址」，订阅里每个节点出现两次——「名称」走 IPv4，「名称 IPv6」走 IPv6，用户自己选。两者是同一个服务、同一个端口，流量只统计一次；IPv6 条目的 TLS SNI 仍是节点域名，所以证书不用改。Clash 配置里 IPv6 条目带 `ip-version: ipv6`。节点域名上残留的 AAAA 记录、IPv6 域名上残留的 A 记录只给出警告，需要到 Cloudflare 手动删除。重复安装时保持原设置，`--ipv6-domain none` 去掉（回到同域名双栈），`--no-ipv6` 回到仅 IPv4。也可以在面板「编辑节点」里手动填写 / 清空「IPv6 地址」。
 
 安装前会逐个检查端口：被其他程序占用时会提示占用的进程 / systemd 服务，并**让你输入另一个端口**（非交互执行时直接退出并提示用哪个参数改）。重复执行时未指定的端口保持原值。SS 用户端口范围内如果有其他程序在监听，安装结束前会给出警告。
 
@@ -180,7 +185,7 @@ Docker：`docker build -t allinone . && docker run -d -p 8080:8080 -v /opt/allin
 
 **用户新增字段**：`ss_port`（1-65535，创建时不传则自动分配，冲突返回 409）、`outbound_group_id`（出口分组 id，`0` = 直连，不存在的 id 返回 400）。创建 / 修改用户时也可用 `used_gb` 或 `used`（字节）直接设置已用流量。
 
-**节点字段**：`type`（`hysteria2` / `anytls` / `shadowsocks`，默认 `hysteria2`）、`name`、`address`、`port`（hysteria2：监听端口；anytls：单个 TCP 端口；shadowsocks：忽略）、`ss_method`（仅 SS2022：`2022-blake3-aes-256-gcm`（默认）/ `2022-blake3-aes-128-gcm` / `2022-blake3-chacha20-poly1305`）、`traffic_multiplier`（节点流量倍数 0-100，默认 1）、`sni`、`insecure`、`enabled`、`sort`；仅 hysteria2：`hop_ports`、`hop_interval`、`obfs_password`、`api_url`、`api_secret`。
+**节点字段**：`type`（`hysteria2` / `anytls` / `shadowsocks`，默认 `hysteria2`）、`name`、`address`、`address_v6`（可选，IPv6 专用域名或 IPv6 地址，订阅里额外生成「名称 IPv6」条目）、`port`（hysteria2：监听端口；anytls：单个 TCP 端口；shadowsocks：忽略）、`ss_method`（仅 SS2022：`2022-blake3-aes-256-gcm`（默认）/ `2022-blake3-aes-128-gcm` / `2022-blake3-chacha20-poly1305`）、`traffic_multiplier`（节点流量倍数 0-100，默认 1）、`sni`、`insecure`、`enabled`、`sort`；仅 hysteria2：`hop_ports`、`hop_interval`、`obfs_password`、`api_url`、`api_secret`。
 
 **agent 接口**（以节点 token 鉴权，供 `allinone-agent` 使用）：`GET /agent/{token}/state`、`POST /agent/{token}/report` `{"counters": {"用户名": 累计字节}, "online": n, "error": "", "version": "", "port": anytls 当前监听端口}`。
 

@@ -1,5 +1,6 @@
 """HTTP server: admin REST API, hysteria2 auth endpoint, node agent endpoints, subscriptions, admin UI."""
 import base64
+import ipaddress
 import json
 import logging
 import math
@@ -131,7 +132,7 @@ def _check_group_ref(svc, data):
         raise APIError(400, "outbound group %d does not exist" % gid)
 
 
-NODE_STR = ("name", "address", "port", "sni", "obfs_password", "hop_ports", "api_url", "api_secret")
+NODE_STR = ("name", "address", "address_v6", "port", "sni", "obfs_password", "hop_ports", "api_url", "api_secret")
 AGENT_TYPES = ("anytls", "shadowsocks")
 
 
@@ -146,11 +147,21 @@ def _check_ranges(spec, name):
             raise APIError(400, "%s: invalid range %s" % (name, part))
 
 
+def _v6_host(v):
+    """A domain name or an IPv6 literal (with or without brackets)."""
+    try:
+        return ipaddress.ip_address(v.strip("[]")).version == 6
+    except ValueError:
+        return bool(re.match(r"^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$", v))
+
+
 def parse_node_input(body, creating, node_type="hysteria2"):
     out = {}
     for k in NODE_STR:
         if k in body:
             out[k] = str(body[k] if body[k] is not None else "").strip()
+    if out.get("address_v6") and not _v6_host(out["address_v6"]):
+        raise APIError(400, "address_v6 must be a domain (with an AAAA record) or an IPv6 address")
     if "type" in body:
         if body["type"] not in NODE_TYPES:
             raise APIError(400, "type must be one of " + "/".join(NODE_TYPES))

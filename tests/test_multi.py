@@ -282,6 +282,31 @@ class MultiTest(test_api.APITest):
         self.call("PATCH", "/api/v1/users/mix", {"enabled": False})
         self.assertEqual(self.links(u), [])
 
+    def test_ipv6_domain_entries(self):
+        self.add_node(name="HY", address="hk.example.com", sni="hk.example.com", address_v6="hk6.example.com")
+        at = self.node(name="AT", type="anytls", address="hk.example.com", port="8443", address_v6="hk6.example.com")
+        self.node(name="SS", type="shadowsocks", address="hk.example.com", address_v6="[2001:db8::7]")
+        self.node(name="V4", type="anytls", address="jp.example.com", port="443", sni="jp.example.com")
+        for bad in ("not a host", "1.2.3.4", "hk6"):
+            self.assertEqual(self.call("PATCH", "/api/v1/nodes/%d" % at["id"], {"address_v6": bad})[0], 400, bad)
+        u = self.user("six", password="sixpass1")
+        links = self.links(u)
+        self.assertEqual([l.rsplit("#", 1)[1] for l in links],
+                         ["HY", "HY%20IPv6", "AT", "AT%20IPv6", "SS", "SS%20IPv6", "V4"])
+        # the IPv6 copy connects to the IPv6 host but keeps the main domain as TLS name
+        self.assertEqual(links[1], "hysteria2://sixpass1@hk6.example.com:443/?sni=hk.example.com#HY%20IPv6")
+        self.assertEqual(links[3], "anytls://sixpass1@hk6.example.com:8443/?sni=hk.example.com#AT%20IPv6")
+        self.assertTrue(links[5].startswith("ss://2022-blake3-aes-256-gcm:") and "@[2001:db8::7]:%d#" % u["ss_port"] in links[5])
+        clash = self.links(u, "?format=clash")
+        self.assertIn('  - name: "AT IPv6"\n    type: anytls\n    server: "hk6.example.com"\n    ip-version: ipv6\n'
+                      '    port: 8443\n', clash)
+        self.assertEqual(clash.count("ip-version: ipv6"), 3)
+        self.assertIn('    sni: "hk.example.com"', clash.split('"AT IPv6"')[1].split("- name")[0])
+        self.assertIn('proxies: ["HY", "HY IPv6", "AT", "AT IPv6", "SS", "SS IPv6", "V4", "DIRECT"]', clash)
+        # clearing it drops the copy
+        self.call("PATCH", "/api/v1/nodes/%d" % at["id"], {"address_v6": ""})
+        self.assertNotIn("AT%20IPv6", " ".join(self.links(u)))
+
     def test_ss2022(self):
         key16 = base64.b64encode(b"k" * 16).decode()
         self.assertEqual(ss_key("2022-blake3-aes-128-gcm", key16), key16)           # already a key
